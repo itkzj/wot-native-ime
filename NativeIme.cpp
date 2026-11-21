@@ -9,7 +9,9 @@
 #include <commctrl.h>
 #include <cstdio>
 #include <imm.h>
+#include <memory>
 #include <new>
+#include <vector>
 
 using Refresh = void (WINAPI*)();
 using Commit = int (WINAPI*)(unsigned, const wchar_t*, int, int, int, const wchar_t*, int, int, int);
@@ -24,6 +26,20 @@ struct Snapshot {
     std::array<int, 8> rects{};
 };
 
+struct ReleaseCom {
+    template<class T> void operator()(T* value) const { value->Release(); }
+};
+
+template<class T> using Com = std::unique_ptr<T, ReleaseCom>;
+
+struct CandidatePage {
+    Com<ITfCandidateListUIElement> list;
+    unsigned serial = 0, composition = 0, first = 0;
+    int selection = -1;
+    bool clickable = false;
+    std::vector<std::wstring> labels;
+};
+
 struct State {
     DWORD thread = 0;
     HWND window = nullptr;
@@ -36,8 +52,7 @@ struct State {
     ITfDocumentMgr* document = nullptr;
     ITfDocumentMgr* previous = nullptr;
     ITfContext* context = nullptr;
-    ITfSource* uiSource = nullptr;
-    DWORD uiCookie = TF_INVALID_COOKIE;
+    CandidatePage candidates;
     TextStore* store = nullptr;
     TfClientId client = 0;
     bool coInitialized = false, activated = false, associated = false;
@@ -50,12 +65,13 @@ struct State {
     std::array<bool, ImeKeyCount> swallowed{};
 };
 thread_local State s;
+thread_local unsigned candidateSerial = 0;
 thread_local struct Diagnostics {
     TextStore::Activity store;
     unsigned blocked = 0, keyDown = 0, processKey = 0, wanted = 0, eaten = 0, noSink = 0, failed = 0;
     unsigned draftDetach = 0, uiSamples = 0, candidates = 0, shown = 0;
-    unsigned uiBegins = 0, uiAllowed = 0, uiChanges = 0;
-    HRESULT uiAdvice = S_FALSE;
+    unsigned overlayRows = 0, overlayClickable = 0, choices = 0;
+    HRESULT choiceResult = S_FALSE;
     unsigned immOpen = 0, immChange = 0, immClose = 0, imeSetContext = 0;
     DWORD imeFlags = 0;
     RECT caret{};
@@ -85,96 +101,122 @@ ITfUIElementMgr* uiManager() {
     return ui;
 }
 
-bool ownsCandidate(ITfUIElement* element) {
-    ITfCandidateListUIElement* candidate = nullptr;
-    if (!element || element->QueryInterface(candidateListId, reinterpret_cast<void**>(&candidate)) != S_OK)
-        return false;
+Com<ITfCandidateListUIElement> ownedCandidate(ITfUIElement* element) {
+    ITfCandidateListUIElement* raw = nullptr;
+    if (element->QueryInterface(candidateListId, reinterpret_cast<void**>(&raw)) != S_OK || !raw)
+        return {};
+    Com<ITfCandidateListUIElement> candidate(raw);
     ITfDocumentMgr* owner = nullptr;
     const bool ours = candidate->GetDocumentMgr(&owner) == S_OK && owner == s.document;
     release(owner);
-    release(candidate);
-    return ours;
+    return ours ? std::move(candidate) : nullptr;
 }
 
-struct CandidateUiSink final : ITfUIElementSink {
-    ULONG refs = 1;
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
-        if (!out) return E_POINTER;
-        *out = nullptr;
-        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElementSink)) return E_NOINTERFACE;
-        *out = static_cast<ITfUIElementSink*>(this);
-        AddRef();
-        return S_OK;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
-    ULONG STDMETHODCALLTYPE Release() override {
-        const ULONG remaining = --refs;
-        if (!remaining) delete this;
-        return remaining;
-    }
-    HRESULT STDMETHODCALLTYPE BeginUIElement(DWORD id, BOOL* show) override {
-        if (!show) return E_POINTER;
-        if (!s.token || !s.document || (s.window && s.window != GetForegroundWindow())) return S_OK;
-        ++diagnostics.uiBegins;
-        if (auto* ui = uiManager()) {
-            ITfUIElement* element = nullptr;
-            if (ui->GetUIElement(id, &element) == S_OK && ownsCandidate(element)) {
-                if (!*show) ++diagnostics.uiChanges;
-                ++diagnostics.uiAllowed;
-                *show = TRUE;
-            }
-            release(element);
-            release(ui);
-        }
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE UpdateUIElement(DWORD) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE EndUIElement(DWORD) override { return S_OK; }
-};
-
-void adviseCandidateUI() {
-    diagnostics.uiAdvice = s.manager->QueryInterface(__uuidof(ITfSource), reinterpret_cast<void**>(&s.uiSource));
-    if (FAILED(diagnostics.uiAdvice)) return;
-    auto* sink = new (std::nothrow) CandidateUiSink;
-    if (sink) {
-        diagnostics.uiAdvice = s.uiSource->AdviseSink(__uuidof(ITfUIElementSink), sink, &s.uiCookie);
-        sink->Release();
-    } else {
-        diagnostics.uiAdvice = E_OUTOFMEMORY;
-    }
+Com<ITfCandidateListUIElementBehavior> candidateBehavior(ITfCandidateListUIElement* candidate) {
+    ITfCandidateListUIElementBehavior* raw = nullptr;
+    candidate->QueryInterface(candidateBehaviorId, reinterpret_cast<void**>(&raw));
+    return Com<ITfCandidateListUIElementBehavior>(raw);
 }
 
-void unadviseCandidateUI() {
-    if (s.uiCookie != TF_INVALID_COOKIE) s.uiSource->UnadviseSink(s.uiCookie);
-    s.uiCookie = TF_INVALID_COOKIE;
-    release(s.uiSource);
+constexpr unsigned MaxCandidateRows = 16;
+bool readCandidatePage(CandidatePage& page) {
+    auto& list = *page.list;
+    UINT count = 0, pageCount = 0, current = 0;
+    if (list.GetCount(&count) != S_OK || !count) return false;
+    UINT last = count;
+    if (list.GetPageIndex(nullptr, 0, &pageCount) == S_OK && pageCount > 1) {
+        // ponytail: ignore malformed or oversized page metadata rather than guessing indices.
+        if (pageCount > 1024 || list.GetCurrentPage(&current) != S_OK || current >= pageCount) return false;
+        std::vector<UINT> offsets(pageCount);
+        if (list.GetPageIndex(offsets.data(), pageCount, &pageCount) != S_OK ||
+            pageCount != offsets.size() || offsets.front() != 0) return false;
+        page.first = offsets[current];
+        if (current + 1 < pageCount) last = offsets[current + 1];
+        if (page.first >= last || last > count) return false;
+    } else if (count > MaxCandidateRows) {
+        return false;
+    }
+    last = page.first + std::min(last - page.first, MaxCandidateRows);
+    UINT selected = 0;
+    if (list.GetSelection(&selected) == S_OK && selected >= page.first && selected < last)
+        page.selection = static_cast<int>(selected - page.first);
+    for (UINT index = page.first; index < last; ++index) {
+        BSTR text = nullptr;
+        const HRESULT result = list.GetString(index, &text);
+        const std::unique_ptr<wchar_t, decltype(&SysFreeString)> owned(text, SysFreeString);
+        const UINT length = text ? SysStringLen(text) : 0;
+        if (result != S_OK || !length || length > 256 || std::wmemchr(text, L'\0', length)) return false;
+        page.labels.emplace_back(text, length);
+    }
+    page.clickable = bool(candidateBehavior(page.list.get()));
+    return true;
 }
 
 void sampleCandidateUI() {
-    if (!s.store || !s.store->composing) return;
-    auto* ui = uiManager();
-    if (!ui) return;
-    IEnumTfUIElements* elements = nullptr;
-    ui->EnumUIElements(&elements);
-    release(ui);
-    if (!elements) return;
-    ++diagnostics.uiSamples;
-
-    unsigned candidates = 0, shown = 0;
-    ITfUIElement* element = nullptr;
-    ULONG fetched = 0;
-    while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
-        if (ownsCandidate(element)) {
-            ++candidates;
-            BOOL visible = FALSE;
-            if (element->IsShown(&visible) == S_OK && visible) ++shown;
+    CandidatePage next;
+    if (s.store && s.store->composing) {
+        auto* ui = uiManager();
+        IEnumTfUIElements* raw = nullptr;
+        if (ui) ui->EnumUIElements(&raw);
+        release(ui);
+        Com<IEnumTfUIElements> elements(raw);
+        if (elements) {
+            ++diagnostics.uiSamples;
+            ITfUIElement* element = nullptr;
+            ULONG fetched = 0;
+            while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
+                Com<ITfUIElement> owned(element);
+                auto list = ownedCandidate(element);
+                element = nullptr;
+                if (!list) continue;
+                BOOL visible = FALSE;
+                const HRESULT result = list->IsShown(&visible);
+                diagnostics.candidates = 1;
+                if (result != S_OK) continue;
+                if (visible) {
+                    diagnostics.shown = 1;
+                    next = CandidatePage{};
+                    break;
+                }
+                if (!next.list) {
+                    CandidatePage page;
+                    page.list = std::move(list);
+                    if (readCandidatePage(page)) next = std::move(page);
+                }
+            }
+            release(element);
         }
-        release(element);
     }
-    release(element);
-    release(elements);
-    diagnostics.candidates = std::max(diagnostics.candidates, candidates);
-    diagnostics.shown = std::max(diagnostics.shown, shown);
+    if (next.list) {
+        const auto& old = s.candidates;
+        next.composition = diagnostics.store.composition;
+        if (next.list == old.list && next.composition == old.composition && next.first == old.first &&
+            next.labels == old.labels && next.clickable == old.clickable) {
+            next.serial = old.serial;
+        } else {
+            if (++candidateSerial == 0) ++candidateSerial;
+            next.serial = candidateSerial;
+        }
+        diagnostics.overlayRows = static_cast<unsigned>(next.labels.size());
+        diagnostics.overlayClickable = next.clickable;
+    }
+    s.candidates = std::move(next);
+}
+
+bool chooseCandidate(unsigned serial, unsigned row) {
+    const auto& page = s.candidates;
+    if (!serial || serial != page.serial || !page.clickable || row >= page.labels.size() ||
+        !s.store || !s.store->composing) return false;
+    auto behavior = candidateBehavior(page.list.get());
+    if (!behavior) return false;
+    const UINT index = page.first + row;
+    ++diagnostics.choices;
+    diagnostics.choiceResult = behavior->SetSelection(index);
+    if (diagnostics.choiceResult != S_OK) return false;
+    if (s.store->composing) diagnostics.choiceResult = behavior->Finalize();
+    if (diagnostics.choiceResult != S_OK) return false;
+    s.candidates = CandidatePage{};
+    return true;
 }
 
 #ifdef TEST_CANDIDATE_UI
@@ -188,28 +230,33 @@ bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore*
     s.token = 1;
     store->composing = true;
     DWORD flags = 0;
-    adviseCandidateUI();
     auto* ui = uiManager();
-    bool success = diagnostics.uiAdvice == S_OK && ui && activeTsfFlags(flags) &&
-                   (flags & TF_TMF_UIELEMENTENABLEDONLY);
+    bool success = ui && activeTsfFlags(flags) && (flags & TF_TMF_UIELEMENTENABLEDONLY);
     if (success) {
-        for (auto* element : {foreign, ours}) {
-            BOOL show = FALSE;
-            DWORD id = 0;
-            if (ui->BeginUIElement(element, &show, &id) != S_OK) {
-                success = false;
-                break;
-            }
-            sampleCandidateUI();
-            const bool ended = ui->EndUIElement(id) == S_OK;
-            success = success && ended && (element != ours || show);
-        }
+        BOOL show = FALSE;
+        DWORD foreignId = 0, ownId = 0;
+        const bool foreignStarted = ui->BeginUIElement(foreign, &show, &foreignId) == S_OK;
+        sampleCandidateUI();
+        success = foreignStarted && !s.candidates.serial;
+        const bool ownStarted = ui->BeginUIElement(ours, &show, &ownId) == S_OK;
+        sampleCandidateUI();
+        const auto serial = s.candidates.serial;
+        success = success && ownStarted && serial && s.candidates.first == 2 &&
+                  s.candidates.selection == 1 && s.candidates.clickable &&
+                  s.candidates.labels == std::vector<std::wstring>{L"\u6d4b", L"\u8bd5"};
+        sampleCandidateUI();
+        success = success && s.candidates.serial == serial &&
+                  !chooseCandidate(serial + 1, 0) && !chooseCandidate(serial, 2) &&
+                  chooseCandidate(serial, 0) && !s.candidates.serial;
+        if (ownStarted && ui->EndUIElement(ownId) != S_OK) success = false;
+        if (foreignStarted && ui->EndUIElement(foreignId) != S_OK) success = false;
+        sampleCandidateUI();
+        success = success && !s.candidates.serial;
     }
     release(ui);
-    unadviseCandidateUI();
     store->composing = false;
     s = State{};
-    return success && diagnostics.uiBegins == 2 && diagnostics.uiAllowed == 1 && diagnostics.candidates == 1;
+    return success;
 }
 #else
 HWND gameWindow() {
@@ -225,6 +272,7 @@ bool foreground() { return s.window && gameWindow() == s.window; }
 void detach() {
     if (!s.token && !s.store) return;
     s.token = 0;
+    s.candidates = CandidatePage{};
     ++s.attachment;
     if (s.immComposing) {
         s.immComposing = false;
@@ -546,7 +594,6 @@ void stop() {
     if (s.window) RemoveWindowSubclass(s.window, wndProc, SubclassId);
     release(s.keys);
     release(s.profiles);
-    unadviseCandidateUI();
     if (s.activated) s.manager->Deactivate();
     release(s.manager);
     if (s.coInitialized) CoUninitialize();
@@ -575,9 +622,7 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
         s.activated = s.manager && SUCCEEDED(s.manager->Activate(&s.client));
         if (s.activated)
             s.manager->QueryInterface(__uuidof(ITfKeystrokeMgr), reinterpret_cast<void**>(&s.keys));
-        if (s.keys) {
-            adviseCandidateUI();
-        } else {
+        if (!s.keys) {
             if (s.activated) s.manager->Deactivate();
             s.activated = false;
             release(s.manager);
@@ -599,11 +644,15 @@ void WINAPI ImeStop() {
     stop();
 }
 
-void WINAPI ImeTick() {
+void ImeTick(unsigned serial, unsigned row) {
     if (s.busy || !s.hook) return;
     Busy busy;
-    try { flushTsf(); sync(); sampleCandidateUI(); }
-    catch (...) { detach(); }
+    try {
+        flushTsf();
+        sync();
+        sampleCandidateUI();
+        if (serial && chooseCandidate(serial, row)) flushTsf();
+    } catch (...) { detach(); }
 }
 
 int WINAPI ImeStatus() {
@@ -697,9 +746,24 @@ PyObject* stopPython(PyObject*, PyObject*) {
     Py_RETURN_NONE;
 }
 
-PyObject* tickPython(PyObject*, PyObject*) {
-    ImeTick();
+PyObject* tickPython(PyObject*, PyObject* args) {
+    unsigned serial = 0, row = 0;
+    if (!PyArg_ParseTuple(args, "|II:ImeTick", &serial, &row)) return nullptr;
+    ImeTick(serial, row);
     Py_RETURN_NONE;
+}
+
+PyObject* candidatesPython(PyObject*, PyObject*) {
+    const auto& page = s.candidates;
+    PyObject* labels = PyList_New(page.labels.size());
+    if (!labels) return nullptr;
+    for (size_t i = 0; i < page.labels.size(); ++i) {
+        const auto& text = page.labels[i];
+        PyObject* label = PyUnicode_FromUnicode(text.data(), text.size());
+        if (!label) { Py_DECREF(labels); return nullptr; }
+        PyList_SET_ITEM(labels, i, label);
+    }
+    return Py_BuildValue("(IiON)", page.serial, page.selection, page.clickable ? Py_True : Py_False, labels);
 }
 
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
@@ -717,12 +781,12 @@ PyObject* diagnosticsPython(PyObject*, PyObject*) {
     std::snprintf(report, sizeof report,
                   "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u "
                   "composition=%u caret=%u/%u draftDetach=%u tsfFlags=%d/0x%lx uiSamples=%u candidates=%u shown=%u "
-                  "uiBegin=%u/%u/%u uiAdvice=0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u "
+                  "overlay=%u/%u choices=%u/0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u "
                   "caretScreen=%ld,%ld,%ld,%ld",
                   ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
                   d.store.composition, d.store.textExtOk, d.store.textExt, d.draftDetach, flagsKnown, flags,
-                  d.uiSamples, d.candidates, d.shown, d.uiBegins, d.uiAllowed, d.uiChanges,
-                  static_cast<DWORD>(d.uiAdvice), d.imeSetContext, d.imeFlags,
+                  d.uiSamples, d.candidates, d.shown, d.overlayRows, d.overlayClickable, d.choices,
+                  static_cast<DWORD>(d.choiceResult), d.imeSetContext, d.imeFlags,
                   d.immOpen, d.immChange, d.immClose, d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
     return PyString_FromString(report);
 }
@@ -750,7 +814,8 @@ PyObject* snapshotPython(PyObject*, PyObject* args) {
 PyMethodDef methods[] = {
     {"ImeStart", startPython, METH_VARARGS, nullptr},
     {"ImeStop", stopPython, METH_NOARGS, nullptr},
-    {"ImeTick", tickPython, METH_NOARGS, nullptr},
+    {"ImeTick", tickPython, METH_VARARGS, nullptr},
+    {"ImeCandidates", candidatesPython, METH_NOARGS, nullptr},
     {"ImeStatus", statusPython, METH_NOARGS, nullptr},
     {"ImeDiagnostics", diagnosticsPython, METH_NOARGS, nullptr},
     {"ImeClear", clearPython, METH_NOARGS, nullptr},

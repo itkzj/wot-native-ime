@@ -6,15 +6,17 @@
 
 bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*);
 
-struct Candidate final : ITfCandidateListUIElement {
+struct Candidate final : ITfCandidateListUIElementBehavior {
     ITfDocumentMgr* document;
     ULONG refs = 1;
+    UINT selection = 3, finalizations = 0;
     bool shown = false;
     explicit Candidate(ITfDocumentMgr* owner) : document(owner) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
         *out = nullptr;
-        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElement) && iid != candidateListId) return E_NOINTERFACE;
-        *out = static_cast<ITfCandidateListUIElement*>(this);
+        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElement) && iid != candidateListId &&
+            iid != candidateBehaviorId) return E_NOINTERFACE;
+        *out = static_cast<ITfCandidateListUIElementBehavior*>(this);
         AddRef();
         return S_OK;
     }
@@ -30,12 +32,28 @@ struct Candidate final : ITfCandidateListUIElement {
         *owner = document;
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetCount(UINT* count) override { *count = 1; return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetSelection(UINT*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetString(UINT, BSTR*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetPageIndex(UINT*, UINT, UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetCount(UINT* count) override { *count = 4; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetSelection(UINT* index) override { *index = selection; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetString(UINT index, BSTR* value) override {
+        const wchar_t* rows[] = {L"first", L"second", L"\u6d4b", L"\u8bd5"};
+        if (index >= 4) return E_INVALIDARG;
+        *value = SysAllocString(rows[index]);
+        return *value ? S_OK : E_OUTOFMEMORY;
+    }
+    HRESULT STDMETHODCALLTYPE GetPageIndex(UINT* offsets, UINT size, UINT* count) override {
+        *count = 2;
+        if (offsets) {
+            if (size < 2) return E_INVALIDARG;
+            offsets[0] = 0;
+            offsets[1] = 2;
+        }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE SetPageIndex(UINT*, UINT) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* page) override { *page = 1; return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetSelection(UINT index) override { selection = index; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Finalize() override { ++finalizations; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Abort() override { return E_NOTIMPL; }
 };
 
 int main() {
@@ -119,6 +137,7 @@ int main() {
     Candidate candidate(document), foreign(other);
     assert(testCandidateUI(manager, document, store, &candidate, &foreign));
     assert(candidate.refs == 1 && foreign.refs == 1);
+    assert(candidate.selection == 2 && candidate.finalizations == 1 && !foreign.finalizations);
     other->Release();
 
     document->Pop(TF_POPF_ALL);

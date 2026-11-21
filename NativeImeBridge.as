@@ -1,13 +1,17 @@
 package {
     import flash.display.DisplayObject;
+    import flash.display.Sprite;
     import flash.display.Stage;
     import flash.events.Event;
     import flash.events.FocusEvent;
+    import flash.events.MouseEvent;
     import flash.geom.Point;
     import flash.geom.Rectangle;
     import flash.system.ApplicationDomain;
     import flash.text.TextField;
+    import flash.text.TextFieldAutoSize;
     import flash.text.TextFieldType;
+    import flash.text.TextFormat;
     import flash.text.TextLineMetrics;
     import net.wg.infrastructure.base.AbstractView;
 
@@ -28,11 +32,24 @@ package {
         private var field:TextField;
         private var generation:uint;
         private var battle:Boolean;
+        private var bridgeDetached:Boolean;
+        private var candidatePanel:Sprite;
+        private var candidateStage:Stage;
+        private var candidateLabels:Array;
+        private var candidateSerial:uint;
+        private var candidateSelection:int = -1;
+        private var candidateLimit:Number;
+        private var candidateWidth:Number;
+        private var candidateHeight:Number;
+        private var pressedRow:int = -1;
+        private var pendingChoice:Array;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
             mouseChildren = false;
             tabEnabled = false;
+            addEventListener(Event.ADDED_TO_STAGE, bridgeStageChanged);
+            addEventListener(Event.REMOVED_FROM_STAGE, bridgeStageChanged);
         }
 
         public function as_start(inBattle:Boolean):void {
@@ -52,8 +69,15 @@ package {
             setField(null);
         }
 
+        private function bridgeStageChanged(event:Event):void {
+            if (event.target !== this) return;
+            bridgeDetached = event.type == Event.REMOVED_FROM_STAGE;
+            if (bridgeDetached) setField(null);
+        }
+
         private function setField(next:TextField):void {
             if (next === field) return;
+            hideCandidates();
             if (field) {
                 field.removeEventListener(FocusEvent.FOCUS_OUT, lostField);
                 field.removeEventListener(Event.REMOVED_FROM_STAGE, lostField);
@@ -96,7 +120,8 @@ package {
 
         private function focused():Stage {
             var movie:Stage = battle ? stage : app && app.instance ? app.stage as Stage : stage;
-            var target:TextField = movie && domain ? (getFocus != null ? getFocus(0) : movie.focus) as TextField : null;
+            var target:TextField = !bridgeDetached && movie && domain ?
+                (getFocus != null ? getFocus(0) : movie.focus) as TextField : null;
             setField(movie && domain && eligible(target, movie) ? target : null);
             return movie;
         }
@@ -123,27 +148,206 @@ package {
             return Math.round(10000 * Math.max(0, Math.min(value, total)) / total);
         }
 
+        private function movieViewport(movie:Stage):Rectangle {
+            var lobby:Boolean = !battle && app && app.instance;
+            var width:Number = lobby ? app.appWidth : movie.stageWidth;
+            var height:Number = lobby ? app.appHeight : movie.stageHeight;
+            return width > 0 && height > 0 && isFinite(width) && isFinite(height) ?
+                new Rectangle(0, 0, width, height) : null;
+        }
+
+        private function visibleCaret(movie:Stage, viewport:Rectangle):Rectangle {
+            var caret:Rectangle = caretLocal(field.caretIndex);
+            if (!caret || viewport.isEmpty()) return null;
+            var a:Point = movie.globalToLocal(field.localToGlobal(caret.topLeft));
+            var b:Point = movie.globalToLocal(field.localToGlobal(caret.bottomRight));
+            if (a.x < viewport.left - 1 || a.x > viewport.right + 1 ||
+                b.y <= viewport.top || a.y >= viewport.bottom) return null;
+            a.x = Math.max(a.x, viewport.left);
+            a.y = Math.max(a.y, viewport.top);
+            return new Rectangle(a.x, a.y, Math.min(b.x, viewport.right) - a.x,
+                Math.min(b.y, viewport.bottom) - a.y);
+        }
+
         public function as_snapshot():Array {
             var movie:Stage = focused();
             if (!field) return null;
-            var width:Number = !battle && app && app.instance ? app.appWidth : movie.stageWidth;
-            var height:Number = !battle && app && app.instance ? app.appHeight : movie.stageHeight;
-            if (!(width > 0 && height > 0)) return null;
-            var bounds:Rectangle = field.getBounds(movie);
-            var caret:Rectangle = caretLocal(field.caretIndex);
-            if (!caret) return null;
-            var a:Point = movie.globalToLocal(field.localToGlobal(caret.topLeft));
-            var b:Point = movie.globalToLocal(field.localToGlobal(caret.bottomRight));
-            var viewport:Rectangle = bounds.intersection(new Rectangle(0, 0, width, height));
-            if (viewport.isEmpty() || a.x < viewport.left - 1 || a.x > viewport.right + 1 ||
-                b.y <= viewport.top || a.y >= viewport.bottom) return null;
+            var screen:Rectangle = movieViewport(movie);
+            var viewport:Rectangle = screen ? field.getBounds(movie).intersection(screen) : null;
+            var caret:Rectangle = viewport ? visibleCaret(movie, viewport) : null;
+            if (!caret) {
+                hideCandidates();
+                return null;
+            }
+            if (candidatePanel) positionCandidates(movie, screen, caret);
             var first:int = field.selectionBeginIndex;
             var last:int = field.selectionEndIndex;
             return [generation, field.text, first, last, first != last && field.caretIndex == first,
-                normalized(Math.max(a.x, viewport.left), width), normalized(Math.max(a.y, viewport.top), height),
-                normalized(Math.min(b.x, viewport.right), width), normalized(Math.min(b.y, viewport.bottom), height),
-                normalized(viewport.left, width), normalized(viewport.top, height),
-                normalized(viewport.right, width), normalized(viewport.bottom, height)];
+                normalized(caret.left, screen.width), normalized(caret.top, screen.height),
+                normalized(caret.right, screen.width), normalized(caret.bottom, screen.height),
+                normalized(viewport.left, screen.width), normalized(viewport.top, screen.height),
+                normalized(viewport.right, screen.width), normalized(viewport.bottom, screen.height)];
+        }
+
+        public function as_candidates(serial:uint, selection:int, clickable:Boolean, labels:Array):void {
+            var movie:Stage = focused();
+            if (!field || serial == 0 || !labels || labels.length == 0 || labels.length > 16) {
+                hideCandidates();
+                return;
+            }
+            var screen:Rectangle = movieViewport(movie);
+            var caret:Rectangle = screen ? visibleCaret(movie, field.getBounds(movie).intersection(screen)) : null;
+            if (!caret) {
+                hideCandidates();
+                return;
+            }
+            if (serial != candidateSerial || !candidatePanel || candidatePanel.parent !== movie) {
+                hideCandidates();
+                for each (var label:* in labels) {
+                    if (!(label is String) || label.length > 256) return;
+                }
+                candidateLabels = labels.concat();
+                candidateSerial = serial;
+                candidatePanel = new Sprite();
+                candidatePanel.mouseChildren = false;
+                candidatePanel.tabEnabled = false;
+                candidatePanel.tabChildren = false;
+                candidatePanel.addEventListener(MouseEvent.MOUSE_DOWN, candidateDown);
+                candidatePanel.addEventListener(MouseEvent.CLICK, candidateClick);
+                // The service view can sit under chat or be clipped. Use the focused movie's Stage.
+                movie.addChild(candidatePanel);
+                candidateStage = movie;
+                movie.addEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true, 100, true);
+                candidateLimit = -1;
+            }
+            if (!clickable) {
+                pendingChoice = null;
+                pressedRow = -1;
+            }
+            candidatePanel.mouseEnabled = clickable;
+            var row:int = selection >= 0 && selection < candidateLabels.length ? selection : -1;
+            if (row != candidateSelection) {
+                candidateSelection = row;
+                if (candidatePanel.numChildren) paintCandidates();
+            }
+            positionCandidates(movie, screen, caret);
+        }
+
+        public function as_takeChoice():Array {
+            if (!pendingChoice) return null;
+            var movie:Stage = focused();
+            if (!candidatePanel || candidatePanel.parent !== movie) {
+                hideCandidates();
+                return null;
+            }
+            var choice:Array = pendingChoice;
+            pendingChoice = null;
+            return choice;
+        }
+
+        private function hideCandidates():void {
+            if (candidateStage) candidateStage.removeEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true);
+            var panel:Sprite = candidatePanel;
+            candidatePanel = null;
+            candidateStage = null;
+            candidateLabels = null;
+            candidateSerial = 0;
+            candidateSelection = -1;
+            pressedRow = -1;
+            pendingChoice = null;
+            if (panel && panel.parent) panel.parent.removeChild(panel);
+        }
+
+        private function positionCandidates(movie:Stage, screen:Rectangle, caret:Rectangle):void {
+            if (candidatePanel.parent !== movie) {
+                hideCandidates();
+                return;
+            }
+            var limit:Number = Math.max(24, screen.width - 8);
+            if (candidateLimit != limit) layoutCandidates(limit);
+            var scale:Number = Math.min(1, screen.width / candidateWidth, screen.height / candidateHeight);
+            candidatePanel.scaleX = candidatePanel.scaleY = scale;
+            var width:Number = candidateWidth * scale;
+            var height:Number = candidateHeight * scale;
+            var y:Number = caret.bottom + 4;
+            if (y + height > screen.height && caret.top - 4 >= height) y = caret.top - 4 - height;
+            candidatePanel.x = Math.max(0, Math.min(caret.left, screen.width - width));
+            candidatePanel.y = Math.max(0, Math.min(y, screen.height - height));
+            if (movie.getChildIndex(candidatePanel) != movie.numChildren - 1)
+                movie.setChildIndex(candidatePanel, movie.numChildren - 1);
+        }
+
+        private function layoutCandidates(limit:Number):void {
+            candidateLimit = limit;
+            pressedRow = -1;
+            while (candidatePanel.numChildren) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
+            var format:TextFormat = new TextFormat("Microsoft YaHei", 16, 0xFFFFFF);
+            candidateWidth = Math.min(100, limit);
+            candidateHeight = 4;
+            for each (var label:String in candidateLabels) {
+                var text:TextField = new TextField();
+                text.embedFonts = false;
+                text.selectable = false;
+                text.multiline = true;
+                text.autoSize = TextFieldAutoSize.LEFT;
+                text.defaultTextFormat = format;
+                text.text = label;
+                text.x = 8;
+                text.y = candidateHeight;
+                if (text.width > limit - 16) {
+                    text.wordWrap = true;
+                    text.width = limit - 16;
+                }
+                candidateWidth = Math.max(candidateWidth, Math.ceil(text.width) + 16);
+                candidateHeight += Math.max(26, Math.ceil(text.height));
+                candidatePanel.addChild(text);
+            }
+            candidateHeight += 4;
+            paintCandidates();
+        }
+
+        private function paintCandidates():void {
+            candidatePanel.graphics.clear();
+            candidatePanel.graphics.beginFill(0x18212B);
+            candidatePanel.graphics.drawRect(0, 0, candidateWidth, candidateHeight);
+            candidatePanel.graphics.endFill();
+            if (candidateSelection < 0) return;
+            var text:TextField = candidatePanel.getChildAt(candidateSelection) as TextField;
+            var height:Number = Math.max(26, Math.ceil(text.height));
+            candidatePanel.graphics.beginFill(0x245681);
+            candidatePanel.graphics.drawRect(0, text.y, candidateWidth, height);
+            candidatePanel.graphics.endFill();
+            candidatePanel.graphics.beginFill(0xF7D267);
+            candidatePanel.graphics.drawRect(0, text.y, 4, height);
+            candidatePanel.graphics.endFill();
+        }
+
+        private function preserveFieldFocus(event:FocusEvent):void {
+            if (event.target === field && candidatePanel && candidatePanel.mouseEnabled &&
+                (event.relatedObject === candidatePanel || (!event.relatedObject &&
+                    candidatePanel.getBounds(candidatePanel).contains(candidatePanel.mouseX, candidatePanel.mouseY)))) {
+                event.preventDefault();
+            }
+        }
+
+        private function candidateRow(y:Number):int {
+            for (var i:int = 0; i < candidatePanel.numChildren; ++i) {
+                var text:TextField = candidatePanel.getChildAt(i) as TextField;
+                if (y >= text.y && y < text.y + Math.max(26, Math.ceil(text.height))) return i;
+            }
+            return -1;
+        }
+
+        private function candidateDown(event:MouseEvent):void {
+            event.stopPropagation();
+            pressedRow = candidateRow(event.localY);
+        }
+
+        private function candidateClick(event:MouseEvent):void {
+            event.stopPropagation();
+            var row:int = candidateRow(event.localY);
+            if (!pendingChoice && row >= 0 && row == pressedRow) pendingChoice = [candidateSerial, row];
+            pressedRow = -1;
         }
 
         private function splitPair(value:String, index:int):Boolean {

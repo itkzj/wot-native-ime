@@ -33,6 +33,8 @@ _errors = set()
 _diag_budget = 40
 _diag_ticks = 0
 _diag_last = None
+_candidate_display = None
+_EMPTY_CANDIDATES = (0, -1, False, [])
 
 
 def _error(where):
@@ -100,17 +102,43 @@ def _load_library():
     raise IOError('_wot_native_ime.pyd is missing from mods/2.4.1.1')
 
 
+def _update_candidates(view, page):
+    global _candidate_display
+    if _candidate_display == (view, page) or (_candidate_display is None and not page[0]):
+        return
+    previous = _candidate_display
+    _candidate_display = None
+    try:
+        if previous and previous[0] is not view:
+            previous[0].flashObject.as_candidates(*_EMPTY_CANDIDATES)
+        if page[0] or (previous and previous[0] is view):
+            view.flashObject.as_candidates(*page)
+        if page[0]:
+            _candidate_display = (view, page)
+    except Exception:
+        _error('Could not update the candidate panel')
+
+
 def _tick():
     global _tick_id, _status, _diag_budget, _diag_ticks, _diag_last
     _tick_id = None
-    if not _enabled or _active() is None:
+    view = _active()
+    if not _enabled or view is None:
         if _library is not None:
             _library.ImeStop()
+        _update_candidates(None, _EMPTY_CANDIDATES)
         return
     try:
         attached = _library.ImeStart(_refresh, _commit)
         if attached:
-            _library.ImeTick()
+            choice = view.flashObject.as_takeChoice() if (
+                _candidate_display and _candidate_display[0] is view and _candidate_display[1][2]) else None
+            if choice is None:
+                _library.ImeTick()
+            else:
+                serial, row = map(int, choice)
+                _library.ImeTick(serial, row)
+        _update_candidates(view, _library.ImeCandidates() if attached else _EMPTY_CANDIDATES)
         status = _library.ImeStatus()
         if status != _status:
             _status = status
@@ -157,7 +185,9 @@ class NativeImeView(View):
             _error('Could not initialize Scaleform input bridge')
 
     def _dispose(self):
-        global _lobby, _battle, _binding
+        global _lobby, _battle, _binding, _candidate_display
+        if _candidate_display and _candidate_display[0] is self:
+            _candidate_display = None
         if _binding and _binding[0] is self:
             _binding = None
         if _lobby is self:
@@ -228,7 +258,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V7 mod loaded')
+        print('[WotNativeIme] V8 mod loaded')
     except Exception:
         _error('Could not register native IME')
 
@@ -249,3 +279,4 @@ def fini():
         _tick_id = None
     if _library is not None:
         _library.ImeStop()
+    _update_candidates(None, _EMPTY_CANDIDATES)
