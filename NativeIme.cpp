@@ -36,6 +36,8 @@ struct State {
     ITfDocumentMgr* document = nullptr;
     ITfDocumentMgr* previous = nullptr;
     ITfContext* context = nullptr;
+    ITfSource* uiSource = nullptr;
+    DWORD uiCookie = TF_INVALID_COOKIE;
     TextStore* store = nullptr;
     TfClientId client = 0;
     bool coInitialized = false, activated = false, associated = false;
@@ -52,8 +54,8 @@ thread_local struct Diagnostics {
     TextStore::Activity store;
     unsigned blocked = 0, keyDown = 0, processKey = 0, wanted = 0, eaten = 0, noSink = 0, failed = 0;
     unsigned draftDetach = 0, uiSamples = 0, candidates = 0, shown = 0;
-    unsigned showAttempts = 0, attemptedComposition = 0;
-    HRESULT showResult = S_OK;
+    unsigned uiBegins = 0, uiAllowed = 0, uiChanges = 0;
+    HRESULT uiAdvice = S_FALSE;
     unsigned immOpen = 0, immChange = 0, immClose = 0, imeSetContext = 0;
     DWORD imeFlags = 0;
     RECT caret{};
@@ -77,46 +79,96 @@ bool activeTsfFlags(DWORD& flags) {
     return known;
 }
 
+ITfUIElementMgr* uiManager() {
+    ITfUIElementMgr* ui = nullptr;
+    s.manager->QueryInterface(__uuidof(ITfUIElementMgr), reinterpret_cast<void**>(&ui));
+    return ui;
+}
+
+bool ownsCandidate(ITfUIElement* element) {
+    ITfCandidateListUIElement* candidate = nullptr;
+    if (!element || element->QueryInterface(candidateListId, reinterpret_cast<void**>(&candidate)) != S_OK)
+        return false;
+    ITfDocumentMgr* owner = nullptr;
+    const bool ours = candidate->GetDocumentMgr(&owner) == S_OK && owner == s.document;
+    release(owner);
+    release(candidate);
+    return ours;
+}
+
+struct CandidateUiSink final : ITfUIElementSink {
+    ULONG refs = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElementSink)) return E_NOINTERFACE;
+        *out = static_cast<ITfUIElementSink*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG remaining = --refs;
+        if (!remaining) delete this;
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE BeginUIElement(DWORD id, BOOL* show) override {
+        if (!show) return E_POINTER;
+        if (!s.token || !s.document || (s.window && s.window != GetForegroundWindow())) return S_OK;
+        ++diagnostics.uiBegins;
+        if (auto* ui = uiManager()) {
+            ITfUIElement* element = nullptr;
+            if (ui->GetUIElement(id, &element) == S_OK && ownsCandidate(element)) {
+                if (!*show) ++diagnostics.uiChanges;
+                ++diagnostics.uiAllowed;
+                *show = TRUE;
+            }
+            release(element);
+            release(ui);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE UpdateUIElement(DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE EndUIElement(DWORD) override { return S_OK; }
+};
+
+void adviseCandidateUI() {
+    diagnostics.uiAdvice = s.manager->QueryInterface(__uuidof(ITfSource), reinterpret_cast<void**>(&s.uiSource));
+    if (FAILED(diagnostics.uiAdvice)) return;
+    auto* sink = new (std::nothrow) CandidateUiSink;
+    if (sink) {
+        diagnostics.uiAdvice = s.uiSource->AdviseSink(__uuidof(ITfUIElementSink), sink, &s.uiCookie);
+        sink->Release();
+    } else {
+        diagnostics.uiAdvice = E_OUTOFMEMORY;
+    }
+}
+
+void unadviseCandidateUI() {
+    if (s.uiCookie != TF_INVALID_COOKIE) s.uiSource->UnadviseSink(s.uiCookie);
+    s.uiCookie = TF_INVALID_COOKIE;
+    release(s.uiSource);
+}
+
 void sampleCandidateUI() {
     if (!s.store || !s.store->composing) return;
-    ITfUIElementMgr* ui = nullptr;
-    if (FAILED(s.manager->QueryInterface(__uuidof(ITfUIElementMgr), reinterpret_cast<void**>(&ui)))) return;
+    auto* ui = uiManager();
+    if (!ui) return;
     IEnumTfUIElements* elements = nullptr;
     ui->EnumUIElements(&elements);
     release(ui);
     if (!elements) return;
     ++diagnostics.uiSamples;
 
-    DWORD flags = 0;
-    const bool requestNativeUI = diagnostics.attemptedComposition != diagnostics.store.composition &&
-                                 activeTsfFlags(flags) && (flags & TF_TMF_UIELEMENTENABLEDONLY);
-    // ponytail: snapshots can miss short-lived UI; advise ITfUIElementSink if needed.
     unsigned candidates = 0, shown = 0;
     ITfUIElement* element = nullptr;
     ULONG fetched = 0;
     while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
-        ITfCandidateListUIElement* candidate = nullptr;
-        if (element->QueryInterface(candidateListId, reinterpret_cast<void**>(&candidate)) == S_OK) {
-            ITfDocumentMgr* owner = nullptr;
-            const bool ours = candidate->GetDocumentMgr(&owner) == S_OK && owner == s.document;
-            release(owner);
-            if (ours) {
-                ++candidates;
-                BOOL visible = FALSE;
-                UINT count = 0;
-                if (element->IsShown(&visible) == S_OK && !visible && requestNativeUI &&
-                    diagnostics.attemptedComposition != diagnostics.store.composition &&
-                    candidate->GetCount(&count) == S_OK && count != 0) {
-                    diagnostics.attemptedComposition = diagnostics.store.composition;
-                    ++diagnostics.showAttempts;
-                    diagnostics.showResult = element->Show(TRUE);
-                    visible = FALSE;
-                    if (element->IsShown(&visible) != S_OK) visible = FALSE;
-                }
-                if (visible) ++shown;
-            }
+        if (ownsCandidate(element)) {
+            ++candidates;
+            BOOL visible = FALSE;
+            if (element->IsShown(&visible) == S_OK && visible) ++shown;
         }
-        release(candidate);
         release(element);
     }
     release(element);
@@ -128,17 +180,36 @@ void sampleCandidateUI() {
 #ifdef TEST_CANDIDATE_UI
 }
 
-bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore* store) {
+bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore* store,
+                     ITfUIElement* ours, ITfUIElement* foreign) {
     s.manager = manager;
     s.document = document;
     s.store = store;
+    s.token = 1;
     store->composing = true;
-    ++diagnostics.store.composition;
-    sampleCandidateUI();
+    DWORD flags = 0;
+    adviseCandidateUI();
+    auto* ui = uiManager();
+    bool success = diagnostics.uiAdvice == S_OK && ui && activeTsfFlags(flags) &&
+                   (flags & TF_TMF_UIELEMENTENABLEDONLY);
+    if (success) {
+        for (auto* element : {foreign, ours}) {
+            BOOL show = FALSE;
+            DWORD id = 0;
+            if (ui->BeginUIElement(element, &show, &id) != S_OK) {
+                success = false;
+                break;
+            }
+            sampleCandidateUI();
+            const bool ended = ui->EndUIElement(id) == S_OK;
+            success = success && ended && (element != ours || show);
+        }
+    }
+    release(ui);
+    unadviseCandidateUI();
     store->composing = false;
     s = State{};
-    return diagnostics.candidates == 1 && diagnostics.shown == 1 &&
-           diagnostics.showAttempts == 1 && diagnostics.showResult == S_OK;
+    return success && diagnostics.uiBegins == 2 && diagnostics.uiAllowed == 1 && diagnostics.candidates == 1;
 }
 #else
 HWND gameWindow() {
@@ -475,6 +546,7 @@ void stop() {
     if (s.window) RemoveWindowSubclass(s.window, wndProc, SubclassId);
     release(s.keys);
     release(s.profiles);
+    unadviseCandidateUI();
     if (s.activated) s.manager->Deactivate();
     release(s.manager);
     if (s.coInitialized) CoUninitialize();
@@ -503,7 +575,9 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
         s.activated = s.manager && SUCCEEDED(s.manager->Activate(&s.client));
         if (s.activated)
             s.manager->QueryInterface(__uuidof(ITfKeystrokeMgr), reinterpret_cast<void**>(&s.keys));
-        if (!s.keys) {
+        if (s.keys) {
+            adviseCandidateUI();
+        } else {
             if (s.activated) s.manager->Deactivate();
             s.activated = false;
             release(s.manager);
@@ -643,11 +717,12 @@ PyObject* diagnosticsPython(PyObject*, PyObject*) {
     std::snprintf(report, sizeof report,
                   "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u "
                   "composition=%u caret=%u/%u draftDetach=%u tsfFlags=%d/0x%lx uiSamples=%u candidates=%u shown=%u "
-                  "show=%u/0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u caretScreen=%ld,%ld,%ld,%ld",
+                  "uiBegin=%u/%u/%u uiAdvice=0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u "
+                  "caretScreen=%ld,%ld,%ld,%ld",
                   ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
                   d.store.composition, d.store.textExtOk, d.store.textExt, d.draftDetach, flagsKnown, flags,
-                  d.uiSamples, d.candidates, d.shown, d.showAttempts, static_cast<DWORD>(d.showResult),
-                  d.imeSetContext, d.imeFlags,
+                  d.uiSamples, d.candidates, d.shown, d.uiBegins, d.uiAllowed, d.uiChanges,
+                  static_cast<DWORD>(d.uiAdvice), d.imeSetContext, d.imeFlags,
                   d.immOpen, d.immChange, d.immClose, d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
     return PyString_FromString(report);
 }

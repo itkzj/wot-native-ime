@@ -228,7 +228,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V6 mod loaded')
+        print('[WotNativeIme] V7 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

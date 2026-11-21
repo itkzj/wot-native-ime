@@ -4,7 +4,7 @@
 #include <cassert>
 #include <cstdio>
 
-bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*);
+bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*);
 
 struct Candidate final : ITfCandidateListUIElement {
     ITfDocumentMgr* document;
@@ -113,18 +113,13 @@ int main() {
     assert(store->draft.text == L"a\u4f60\u597dc" && store->draft.first == 3 && store->draft.last == 3);
     assert(!store->composing && store->finishedComposition);
 
-    // Keep the candidate provider in a separate translation unit from the sampler,
-    // just as the real Windows input method lives outside the mod DLL.
-    ITfUIElementMgr* ui = nullptr;
-    assert(manager->QueryInterface(__uuidof(ITfUIElementMgr), reinterpret_cast<void**>(&ui)) == S_OK);
-    Candidate candidate(document);
-    BOOL show = FALSE;
-    DWORD element = 0;
-    assert(ui->BeginUIElement(&candidate, &show, &element) == S_OK);
-    assert(testCandidateUI(manager, document, store) && candidate.shown);
-    assert(ui->EndUIElement(element) == S_OK);
-    ui->Release();
-    assert(candidate.refs == 1);
+    // The test candidate lives in a separate translation unit from the mod's COM client.
+    ITfDocumentMgr* other = nullptr;
+    assert(manager->CreateDocumentMgr(&other) == S_OK);
+    Candidate candidate(document), foreign(other);
+    assert(testCandidateUI(manager, document, store, &candidate, &foreign));
+    assert(candidate.refs == 1 && foreign.refs == 1);
+    other->Release();
 
     document->Pop(TF_POPF_ALL);
     context->Release();
