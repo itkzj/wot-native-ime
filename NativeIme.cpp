@@ -4,6 +4,7 @@
 #include "TextStore.h"
 #include <array>
 #include <commctrl.h>
+#include <cstdio>
 #include <imm.h>
 #include <new>
 
@@ -44,6 +45,10 @@ struct State {
     std::array<bool, ImeKeyCount> swallowed{};
 };
 thread_local State s;
+thread_local struct Diagnostics {
+    TextStore::Activity store;
+    unsigned blocked = 0, keyDown = 0, processKey = 0, wanted = 0, eaten = 0, noSink = 0, failed = 0;
+} diagnostics;
 
 struct Busy {
     Busy() { s.busy = true; }
@@ -108,7 +113,7 @@ void locate();
 
 bool attachTsf() {
     if (!s.manager) return false;
-    s.store = new (std::nothrow) TextStore(s.window, s.base);
+    s.store = new (std::nothrow) TextStore(s.window, s.base, &diagnostics.store);
     if (!s.store) return false;
     locate();
     TfEditCookie cookie;
@@ -231,7 +236,11 @@ void sync() {
 void handleKey(MSG& msg) {
     const bool down = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
     const bool up = msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP;
-    if ((!up && !down) || msg.hwnd != s.window || !foreground()) return;
+    if (!up && !down) return;
+    if (msg.hwnd != s.window || !foreground()) {
+        if (down && s.store) ++diagnostics.blocked;
+        return;
+    }
     const auto originalKey = msg.wParam;
     const auto key = originalKey == VK_PROCESSKEY ? ImmGetVirtualKey(s.window) : originalKey;
     const bool tracked = key < ImeKeyCount;
@@ -244,14 +253,27 @@ void handleKey(MSG& msg) {
     sync();
     bool eaten = false;
     if (s.store && s.keys) {
+        if (down) {
+            ++diagnostics.keyDown;
+            if (originalKey == VK_PROCESSKEY) ++diagnostics.processKey;
+        }
         const bool wasComposing = s.store->composing;
         BOOL wants = FALSE, handled = FALSE;
         const HRESULT test = down ? s.keys->TestKeyDown(msg.wParam, msg.lParam, &wants)
                                   : s.keys->TestKeyUp(msg.wParam, msg.lParam, &wants);
+        if (down) {
+            if (test == S_FALSE) ++diagnostics.noSink;
+            if (FAILED(test)) ++diagnostics.failed;
+        }
         if (test == S_OK && wants) {
             const HRESULT result = down ? s.keys->KeyDown(msg.wParam, msg.lParam, &handled)
                                         : s.keys->KeyUp(msg.wParam, msg.lParam, &handled);
             eaten = result == S_OK && handled;
+            if (down) {
+                ++diagnostics.wanted;
+                if (eaten) ++diagnostics.eaten;
+                if (FAILED(result)) ++diagnostics.failed;
+            }
         }
         if (down && key == VK_RETURN && wasComposing) eaten = true;
         if (down && key == VK_ESCAPE && wasComposing) {
@@ -513,6 +535,21 @@ PyObject* tickPython(PyObject*, PyObject*) {
 
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
 
+PyObject* diagnosticsPython(PyObject*, PyObject*) {
+    ITfDocumentMgr* focused = nullptr;
+    const bool ownsFocus = s.document && s.manager->GetFocus(&focused) == S_OK && focused == s.document;
+    release(focused);
+    CLSID tip{};
+    const bool hasTip = s.keys && s.keys->GetForeground(&tip) == S_OK && !IsEqualGUID(tip, GUID_NULL);
+    const auto& d = diagnostics;
+    char report[256];
+    std::snprintf(report, sizeof report,
+                  "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u composition=%u caret=%u/%u",
+                  ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
+                  d.store.composition, d.store.textExtOk, d.store.textExt);
+    return PyString_FromString(report);
+}
+
 PyObject* clearPython(PyObject*, PyObject*) {
     s.sample.token = 0;
     Py_RETURN_NONE;
@@ -538,6 +575,7 @@ PyMethodDef methods[] = {
     {"ImeStop", stopPython, METH_NOARGS, nullptr},
     {"ImeTick", tickPython, METH_NOARGS, nullptr},
     {"ImeStatus", statusPython, METH_NOARGS, nullptr},
+    {"ImeDiagnostics", diagnosticsPython, METH_NOARGS, nullptr},
     {"ImeClear", clearPython, METH_NOARGS, nullptr},
     {"ImeSnapshot", snapshotPython, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},

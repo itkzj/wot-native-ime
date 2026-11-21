@@ -30,6 +30,9 @@ _status = None
 _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attached',
                   3: 'IMM attached', 4: 'TSF association failed'}
 _errors = set()
+_diag_budget = 40
+_diag_ticks = 0
+_diag_last = None
 
 
 def _error(where):
@@ -98,7 +101,7 @@ def _load_library():
 
 
 def _tick():
-    global _tick_id, _status
+    global _tick_id, _status, _diag_budget, _diag_ticks, _diag_last
     _tick_id = None
     if not _enabled or _active() is None:
         if _library is not None:
@@ -112,6 +115,17 @@ def _tick():
         if status != _status:
             _status = status
             print('[WotNativeIme] ' + _status_labels[status])
+        if status == 2 and _diag_budget:
+            # V3-only trace. Sample about twice a second and log only changes.
+            if _diag_ticks == 0:
+                report = _library.ImeDiagnostics()
+                if report != _diag_last:
+                    print('[WotNativeIme] TSF diagnostic ' + report)
+                    _diag_last = report
+                    _diag_budget -= 1
+            _diag_ticks = (_diag_ticks + 1) % 32
+        else:
+            _diag_ticks = 0
     except Exception:
         _error('Native input host unavailable')
         attached = False
@@ -214,7 +228,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V2 mod loaded')
+        print('[WotNativeIme] V3 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

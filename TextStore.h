@@ -32,7 +32,12 @@ public:
     RECT caret{}, field{}; // Screen coordinates in the window's DPI context.
     bool composing = false, acceptComposition = true;
     bool cancelled = false, finishedComposition = false;
-    explicit TextStore(HWND hwnd, const Draft& initial) : window(hwnd), draft(initial) {}
+    struct Activity {
+        unsigned composition = 0, textExt = 0, textExtOk = 0;
+    };
+    Activity* activity = nullptr;
+    explicit TextStore(HWND hwnd, const Draft& initial, Activity* trace = nullptr)
+        : window(hwnd), draft(initial), activity(trace) {}
     ~TextStore() { if (sink) sink->Release(); }
 
     void updateDraft(const Draft& value) {
@@ -205,9 +210,11 @@ public:
     }
     // ponytail: this adapter has caret geometry only; add per-character layout for reconversion.
     HRESULT STDMETHODCALLTYPE GetTextExt(TsViewCookie view, LONG first, LONG last, RECT* bounds, BOOL* clipped) override {
+        if (activity) ++activity->textExt;
         if (!read()) return TS_E_NOLOCK;
         if (view != 1 || !range(first, last)) return TS_E_INVALIDPOS;
         if (IsRectEmpty(&caret)) return TS_E_NOLAYOUT;
+        if (activity) ++activity->textExtOk;
         *bounds = caret;
         *clipped = FALSE;
         return S_OK;
@@ -237,7 +244,10 @@ public:
     HRESULT STDMETHODCALLTYPE RetrieveRequestedAttrs(ULONG, TS_ATTRVAL*, ULONG* found) override { *found = 0; return S_OK; }
     HRESULT STDMETHODCALLTYPE OnStartComposition(ITfCompositionView*, BOOL* yes) override {
         *yes = acceptComposition && !composing;
-        if (*yes) composing = true;
+        if (*yes) {
+            composing = true;
+            if (activity) ++activity->composition;
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnUpdateComposition(ITfCompositionView*, ITfRange*) override { return S_OK; }
