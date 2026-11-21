@@ -281,17 +281,18 @@ package {
             candidateLimit = limit;
             pressedRow = -1;
             while (candidatePanel.numChildren) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
-            var format:TextFormat = new TextFormat("Microsoft YaHei", 16, 0xFFFFFF);
+            var format:TextFormat = new TextFormat("Microsoft YaHei", 16, 0xF5F1E5);
             candidateWidth = Math.min(100, limit);
             candidateHeight = 4;
-            for each (var label:String in candidateLabels) {
+            for (var index:int = 0; index < candidateLabels.length; ++index) {
                 var text:TextField = new TextField();
                 text.embedFonts = false;
                 text.selectable = false;
                 text.multiline = true;
                 text.autoSize = TextFieldAutoSize.LEFT;
                 text.defaultTextFormat = format;
-                text.text = label;
+                text.text = candidateLabels[index];
+                if (index < 9) text.text = (index + 1) + ". " + text.text;
                 text.x = 8;
                 text.y = candidateHeight;
                 if (text.width > limit - 16) {
@@ -308,13 +309,13 @@ package {
 
         private function paintCandidates():void {
             candidatePanel.graphics.clear();
-            candidatePanel.graphics.beginFill(0x18212B);
+            candidatePanel.graphics.beginFill(0x1B2619);
             candidatePanel.graphics.drawRect(0, 0, candidateWidth, candidateHeight);
             candidatePanel.graphics.endFill();
             if (candidateSelection < 0) return;
             var text:TextField = candidatePanel.getChildAt(candidateSelection) as TextField;
             var height:Number = Math.max(26, Math.ceil(text.height));
-            candidatePanel.graphics.beginFill(0x245681);
+            candidatePanel.graphics.beginFill(0x384B2C);
             candidatePanel.graphics.drawRect(0, text.y, candidateWidth, height);
             candidatePanel.graphics.endFill();
             candidatePanel.graphics.beginFill(0xF7D267);
