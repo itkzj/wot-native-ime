@@ -78,7 +78,8 @@ thread_local struct Diagnostics {
     HRESULT choiceResult = S_FALSE;
     unsigned immOpen = 0, immChange = 0, immClose = 0, imeSetContext = 0;
     DWORD imeFlags = 0, immNotifyMask = 0;
-    unsigned immReads = 0, immPages = 0;
+    unsigned immReads = 0, immPages = 0, queuedCandidates = 0;
+    bool segmented = false;
     RECT caret{};
 } diagnostics;
 
@@ -233,16 +234,59 @@ struct ImmContext {
     ~ImmContext() { if (handle) ImmReleaseContext(window, handle); }
 };
 
-std::wstring immText(HWND window, DWORD kind) {
-    const ImmContext imc(window);
-    if (!imc.handle) return {};
-    const LONG bytes = ImmGetCompositionStringW(imc.handle, kind, nullptr, 0);
+std::wstring immText(HIMC handle, DWORD kind) {
+    if (!handle) return {};
+    const LONG bytes = ImmGetCompositionStringW(handle, kind, nullptr, 0);
     if (bytes <= 0 || bytes > TextStore::Capacity * 2 || bytes % 2 != 0) return {};
     std::wstring text(bytes / 2, L'\0');
-    if (ImmGetCompositionStringW(imc.handle, kind, text.data(), bytes) != bytes ||
+    if (ImmGetCompositionStringW(handle, kind, text.data(), bytes) != bytes ||
         text.find(L'\0') != std::wstring::npos) return {};
     return text;
 }
+
+bool readingMatches(const std::wstring& text, const std::wstring& reading) {
+    size_t pos = 0;
+    for (const auto ch : reading) {
+        if (ch == L'\'' || ch == L'\u2019' || ch == L' ') continue;
+        if (pos == text.size() || text[pos++] != ch) return false;
+    }
+    return pos == text.size();
+}
+
+std::wstring withClauseSeparators(const std::wstring& text, const std::vector<DWORD>& offsets) {
+    if (offsets.size() < 3 || offsets.front() != 0 || offsets.back() != text.size() ||
+        text.size() + offsets.size() - 2 > TextStore::Capacity) return text;
+    std::wstring separated;
+    for (size_t i = 1; i < offsets.size(); ++i) {
+        if (offsets[i] <= offsets[i - 1] || offsets[i] > text.size()) return text;
+        if (i > 1) separated += L'\'';
+        separated.append(text, offsets[i - 1], offsets[i] - offsets[i - 1]);
+    }
+    return separated;
+}
+
+std::wstring immClausePreview(HIMC handle, const std::wstring& text, DWORD kind) {
+    const LONG bytes = ImmGetCompositionStringW(handle, kind, nullptr, 0);
+    const LONG unit = static_cast<LONG>(sizeof(DWORD));
+    if (bytes < 3 * unit || bytes % unit || static_cast<size_t>(bytes / unit) > text.size() + 1) return text;
+    std::vector<DWORD> offsets(bytes / unit);
+    if (ImmGetCompositionStringW(handle, kind, offsets.data(), bytes) != bytes) return text;
+    return withClauseSeparators(text, offsets);
+}
+
+std::wstring immPreedit(HIMC handle, const std::wstring& text) {
+    if (text.empty() || text.find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::wstring::npos)
+        return text;
+    const auto reading = immText(handle, GCS_COMPREADSTR);
+    if (reading.size() > text.size() && readingMatches(text, reading)) return reading;
+    if (reading == text) {
+        auto segmented = immClausePreview(handle, text, GCS_COMPREADCLAUSE);
+        if (segmented != text) return segmented;
+    }
+    return immText(handle, GCS_COMPSTR) == text ? immClausePreview(handle, text, GCS_COMPCLAUSE) : text;
+}
+
+bool composing() { return s.store ? s.store->composing : s.immComposing; }
 
 void sampleCandidateUI() {
     CandidatePage next;
@@ -286,14 +330,23 @@ void sampleCandidateUI() {
             release(element);
         }
     }
-    if (!next.list && !nativeVisible && s.immListMask) {
+    if (!next.list && !nativeVisible && s.immListMask && composing()) {
         next.first = s.immCandidates.first;
         next.selection = s.immCandidates.selection;
         next.labels = s.immCandidates.labels;
     }
+    diagnostics.segmented = false;
     if (!nativeVisible) {
         if (s.store) next.preedit = compositionText(s.context, *s.store);
-        else if (s.immComposing) next.preedit = immText(s.window, GCS_COMPSTR);
+        if (s.immComposing || (s.immListMask && !next.preedit.empty())) {
+            const ImmContext imc(s.window);
+            if (imc.handle) {
+                if (!s.store) next.preedit = immText(imc.handle, GCS_COMPSTR);
+                const auto rawLength = next.preedit.size();
+                next.preedit = immPreedit(imc.handle, std::move(next.preedit));
+                diagnostics.segmented = next.preedit.size() > rawLength;
+            }
+        }
     }
     if (!next.labels.empty() || !next.preedit.empty()) {
         const auto& old = s.candidates;
@@ -335,6 +388,24 @@ bool testImmCandidatePage(const void* buffer, DWORD bytes, bool valid) {
     if (!valid) return !readImmPage(buffer, bytes, page);
     return readImmPage(buffer, bytes, page) && page.first == 1 && page.selection == 1 &&
            page.labels == std::vector<std::wstring>{L"\u4f60", L"\u597d"};
+}
+
+bool testImmPreview() {
+    const std::wstring raw = L"nihao";
+    if (!readingMatches(raw, L"ni'hao") || readingMatches(raw, L"ni'huo") ||
+        withClauseSeparators(raw, {0, 2, 5}) != L"ni'hao" ||
+        withClauseSeparators(raw, {0, 2, 1, 5}) != raw) return false;
+    s.imm = true;
+    s.immComposing = true;
+    s.immListMask = 1;
+    s.immCandidates.labels = {L"\u4f60\u597d"};
+    sampleCandidateUI();
+    const bool shown = s.candidates.serial && s.candidates.labels.size() == 1;
+    s.immComposing = false;
+    sampleCandidateUI();
+    const bool closed = !s.candidates.serial && s.candidates.labels.empty();
+    s = State{};
+    return shown && closed;
 }
 
 std::wstring testPreedit(ITfThreadMgr* manager, ITfContext* context, TextStore* store) {
@@ -526,6 +597,7 @@ void flushTsf() {
         after.text.size() + removed == old.text.size() &&
         after.text.compare(0, old.first, old.text, 0, old.first) == 0 &&
         after.text.compare(old.first, std::wstring::npos, old.text, old.last, std::wstring::npos) == 0;
+    if (s.store->finishedComposition) clearImmCandidates();
     s.store->finishedComposition = false;
     if (s.store->cancelled || restoredEmpty) {
         s.store->cancelled = false;
@@ -636,11 +708,16 @@ void handleKey(MSG& msg) {
     }
 }
 
+void handleQueuedIme(MSG& msg);
+
 LRESULT CALLBACK getMessage(int code, WPARAM kind, LPARAM param) {
     if (code == HC_ACTION && kind == PM_REMOVE && !s.busy) {
         Busy busy;
-        try { handleKey(*reinterpret_cast<MSG*>(param)); }
-        catch (...) { detach(); }
+        auto& message = *reinterpret_cast<MSG*>(param);
+        try {
+            handleQueuedIme(message);
+            handleKey(message);
+        } catch (...) { detach(); }
     }
     return CallNextHookEx(nullptr, code, kind, param);
 }
@@ -689,7 +766,8 @@ DWORD handleImmCandidates(WPARAM notification, DWORD mask) {
 
 void immResult(LPARAM flags) {
     if (!(flags & GCS_RESULTSTR)) return;
-    const auto text = immText(s.window, GCS_RESULTSTR);
+    const ImmContext imc(s.window);
+    const auto text = immText(imc.handle, GCS_RESULTSTR);
     if (text.empty()) return;
     Draft next = s.base;
     next.text.replace(next.first, next.last - next.first, text);
@@ -699,23 +777,65 @@ void immResult(LPARAM flags) {
     if (next.text.size() <= TextStore::Capacity && !commit(next)) detach();
 }
 
+DWORD filterCandidateNotification(WPARAM notification, DWORD mask) {
+    switch (notification) {
+    case IMN_OPENCANDIDATE: ++diagnostics.immOpen; break;
+    case IMN_CHANGECANDIDATE: ++diagnostics.immChange; break;
+    case IMN_CLOSECANDIDATE: ++diagnostics.immClose; break;
+    default: return mask;
+    }
+    diagnostics.immNotifyMask = mask;
+    if (!s.token || !foreground()) return mask;
+    try { return handleImmCandidates(notification, mask); }
+    catch (...) { clearImmCandidates(); return mask; }
+}
+
+void handleComposition(UINT message, LPARAM flags) {
+    if (message == WM_IME_ENDCOMPOSITION ||
+        (message == WM_IME_COMPOSITION && (flags & GCS_RESULTSTR) && !(flags & GCS_COMPSTR)))
+        clearImmCandidates();
+    if (!s.imm) return;
+    const auto attachment = s.attachment;
+    sync();
+    if (!s.imm || (message != WM_IME_STARTCOMPOSITION && attachment != s.attachment)) return;
+    if (message == WM_IME_STARTCOMPOSITION) s.immComposing = true;
+    if (message == WM_IME_COMPOSITION) immResult(flags);
+    if (message == WM_IME_ENDCOMPOSITION) s.immComposing = false;
+}
+
+void handleQueuedIme(MSG& msg) {
+    if (msg.hwnd != s.window || !s.token || !foreground()) return;
+    switch (msg.message) {
+    case WM_IME_NOTIFY: {
+        const auto original = static_cast<DWORD>(msg.lParam);
+        const auto remaining = filterCandidateNotification(msg.wParam, original);
+        if (remaining == original) return;
+        ++diagnostics.queuedCandidates;
+        if (remaining) { msg.lParam = remaining; return; }
+        break;
+    }
+    case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
+        handleComposition(msg.message, msg.lParam);
+        break;
+    case WM_IME_CHAR:
+        break;
+    default:
+        return;
+    }
+    // Scaleform may preprocess retrieved IME messages before dispatch reaches wndProc.
+    msg.message = WM_NULL;
+    msg.wParam = 0;
+    msg.lParam = 0;
+}
+
 LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
     if (w && message == WM_IME_SETCONTEXT) {
         ++diagnostics.imeSetContext;
         diagnostics.imeFlags = static_cast<DWORD>(l);
-    } else if (message == WM_IME_NOTIFY && (w == IMN_OPENCANDIDATE || w == IMN_CHANGECANDIDATE ||
-                                           w == IMN_CLOSECANDIDATE)) {
-        if (w == IMN_OPENCANDIDATE) ++diagnostics.immOpen;
-        if (w == IMN_CHANGECANDIDATE) ++diagnostics.immChange;
-        if (w == IMN_CLOSECANDIDATE) ++diagnostics.immClose;
-        diagnostics.immNotifyMask = static_cast<DWORD>(l);
-        if (s.token) {
-            try {
-                const DWORD mask = handleImmCandidates(w, diagnostics.immNotifyMask);
-                if (mask != static_cast<DWORD>(l))
-                    return mask ? DefWindowProcW(window, message, w, mask) : 0;
-            } catch (...) { clearImmCandidates(); }
-        }
+    } else if (message == WM_IME_NOTIFY) {
+        const DWORD mask = filterCandidateNotification(w, static_cast<DWORD>(l));
+        if (mask != static_cast<DWORD>(l))
+            return mask ? DefWindowProcW(window, message, w, mask) : 0;
     }
     if (message == WM_NCDESTROY) {
         if (!s.busy) { Busy busy; detach(); }
@@ -732,19 +852,12 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
         case WM_IME_CHAR:
             return 0; // GCS_RESULTSTR and TSF are the sole writers.
         case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
-            if (message == WM_IME_ENDCOMPOSITION) clearImmCandidates();
-            if (!s.busy && s.imm) {
+            if (!s.busy) {
                 Busy busy;
-                try {
-                    const unsigned attachment = s.attachment;
-                    sync();
-                    if (message != WM_IME_STARTCOMPOSITION && attachment != s.attachment) return 0;
-                    if (s.imm) {
-                        if (message == WM_IME_STARTCOMPOSITION) s.immComposing = true;
-                        if (message == WM_IME_COMPOSITION) immResult(l);
-                        if (message == WM_IME_ENDCOMPOSITION) s.immComposing = false;
-                    }
-                } catch (...) { detach(); }
+                try { handleComposition(message, l); }
+                catch (...) { detach(); }
+            } else if (message == WM_IME_ENDCOMPOSITION) {
+                clearImmCandidates();
             }
             return 0; // The mod renders preedit and owns confirmed text.
         case WM_IME_SETCONTEXT: {
@@ -955,13 +1068,13 @@ PyObject* diagnosticsPython(PyObject*, PyObject*) {
                   "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u "
                   "composition=%u caret=%u/%u draftDetach=%u tsfFlags=%d/0x%lx uiSamples=%u candidates=%u shown=%u "
                   "overlay=%u/%u choices=%u/0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u "
-                  "immRead=%u/%u mask=0x%lx owned=0x%lx caretScreen=%ld,%ld,%ld,%ld",
+                  "immRead=%u/%u mask=0x%lx owned=0x%lx queued=%u segmented=%d caretScreen=%ld,%ld,%ld,%ld",
                   ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
                   d.store.composition, d.store.textExtOk, d.store.textExt, d.draftDetach, flagsKnown, flags,
                   d.uiSamples, d.candidates, d.shown, d.overlayRows, d.overlayClickable, d.choices,
                   static_cast<DWORD>(d.choiceResult), d.imeSetContext, d.imeFlags,
                   d.immOpen, d.immChange, d.immClose, d.immReads, d.immPages, d.immNotifyMask, s.immListMask,
-                  d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
+                  d.queuedCandidates, d.segmented, d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
     return PyString_FromString(report);
 }
 

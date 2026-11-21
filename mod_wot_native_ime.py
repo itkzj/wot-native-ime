@@ -34,6 +34,7 @@ _diag_budget = 40
 _diag_ticks = 0
 _diag_last = None
 _candidate_display = None
+_stock_hidden = None
 _EMPTY_CANDIDATES = (0, -1, False, [], u'')
 
 
@@ -119,6 +120,21 @@ def _update_candidates(view, page):
         _error('Could not update the candidate panel')
 
 
+def _update_stock_status(binding):
+    global _stock_hidden
+    if binding == _stock_hidden:
+        return
+    previous, _stock_hidden = _stock_hidden, None
+    try:
+        if previous:
+            previous[0].flashObject.as_owned(False)
+        if binding:
+            binding[0].flashObject.as_owned(True)
+            _stock_hidden = binding
+    except Exception:
+        _error('Could not update stock IME status visibility')
+
+
 def _tick():
     global _tick_id, _status, _diag_budget, _diag_ticks, _diag_last
     _tick_id = None
@@ -127,6 +143,7 @@ def _tick():
         if _library is not None:
             _library.ImeStop()
         _update_candidates(None, _EMPTY_CANDIDATES)
+        _update_stock_status(None)
         return
     try:
         attached = _library.ImeStart(_refresh, _commit)
@@ -140,6 +157,7 @@ def _tick():
                 _library.ImeTick(serial, row)
         _update_candidates(view, _library.ImeCandidates() if attached else _EMPTY_CANDIDATES)
         status = _library.ImeStatus()
+        _update_stock_status(_binding if status in (2, 3) and _binding and _binding[0] is view else None)
         if status != _status:
             _status = status
             print('[WotNativeIme] ' + _status_labels[status])
@@ -185,7 +203,9 @@ class NativeImeView(View):
             _error('Could not initialize Scaleform input bridge')
 
     def _dispose(self):
-        global _lobby, _battle, _binding, _candidate_display
+        global _lobby, _battle, _binding, _candidate_display, _stock_hidden
+        if _stock_hidden and _stock_hidden[0] is self:
+            _stock_hidden = None
         if _candidate_display and _candidate_display[0] is self:
             _candidate_display = None
         if _binding and _binding[0] is self:
@@ -258,7 +278,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V11 mod loaded')
+        print('[WotNativeIme] V12 mod loaded')
     except Exception:
         _error('Could not register native IME')
 
@@ -267,6 +287,7 @@ def fini():
     global _enabled, _listening, _tick_id, _binding
     _enabled = False
     _binding = None
+    _update_stock_status(None)
     if _listening:
         g_eventBus.removeListener(events.GUICommonEvent.LOBBY_VIEW_LOADED, _on_lobby_loaded)
         _listening = False

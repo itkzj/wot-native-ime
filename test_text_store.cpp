@@ -7,6 +7,7 @@
 std::wstring testPreedit(ITfThreadMgr*, ITfContext*, TextStore*);
 bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*);
 bool testImmCandidatePage(const void*, DWORD, bool);
+bool testImmPreview();
 
 struct Candidate final : ITfCandidateListUIElementBehavior {
     ITfDocumentMgr* document;
@@ -66,6 +67,7 @@ int main() {
     imm[8] = 46;
     imm[11] = 0x597d597d;
     assert(testImmCandidatePage(imm, sizeof imm, false));
+    assert(testImmPreview());
 
     assert(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)));
     ITfThreadMgr* manager = nullptr;

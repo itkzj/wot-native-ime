@@ -1,5 +1,6 @@
 package {
     import flash.display.DisplayObject;
+    import flash.display.DisplayObjectContainer;
     import flash.display.GradientType;
     import flash.display.Graphics;
     import flash.display.Sprite;
@@ -47,6 +48,7 @@ package {
         private var candidateHeight:Number;
         private var pressedRow:int = -1;
         private var pendingChoice:Array;
+        private var stockImeWindows:Array = [];
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -79,8 +81,26 @@ package {
             if (bridgeDetached) setField(null);
         }
 
+        public function as_owned(owned:Boolean):void {
+            if (!owned || !field) {
+                for each (var state:Array in stockImeWindows) state[0].visible = state[1];
+                stockImeWindows.length = 0;
+                return;
+            }
+            if (stockImeWindows.length || !app || !app.utils || !app.utils.IME) return;
+            var container:DisplayObjectContainer = app.utils.IME.getContainer() as DisplayObjectContainer;
+            if (!container) return;
+            for each (var name:String in ["LangBar", "StatusWindow"]) {
+                var child:DisplayObject = container.getChildByName(name);
+                if (!child) continue;
+                stockImeWindows.push([child, child.visible]);
+                child.visible = false;
+            }
+        }
+
         private function setField(next:TextField):void {
             if (next === field) return;
+            as_owned(false);
             hideCandidates();
             if (field) {
                 field.removeEventListener(FocusEvent.FOCUS_OUT, lostField);
