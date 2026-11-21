@@ -6,6 +6,7 @@
 
 std::wstring testPreedit(ITfThreadMgr*, ITfContext*, TextStore*);
 bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*);
+bool testImmCandidatePage(const void*, DWORD, bool);
 
 struct Candidate final : ITfCandidateListUIElementBehavior {
     ITfDocumentMgr* document;
@@ -58,6 +59,14 @@ struct Candidate final : ITfCandidateListUIElementBehavior {
 };
 
 int main() {
+    // CANDIDATELIST with three UTF-16 entries and a second page starting at index 1.
+    DWORD imm[] = {48, 0, 3, 2, 1, 2, 36, 40, 44, 'a', 0x4f60, 0x597d};
+    assert(testImmCandidatePage(imm, sizeof imm, true));
+    assert(testImmCandidatePage(imm, sizeof imm - 1, false));
+    imm[8] = 46;
+    imm[11] = 0x597d597d;
+    assert(testImmCandidatePage(imm, sizeof imm, false));
+
     assert(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)));
     ITfThreadMgr* manager = nullptr;
     assert(SUCCEEDED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
@@ -148,7 +157,9 @@ int main() {
     ITfDocumentMgr* other = nullptr;
     assert(manager->CreateDocumentMgr(&other) == S_OK);
     Candidate candidate(document), foreign(other);
+    candidate.shown = foreign.shown = true;
     assert(testCandidateUI(manager, document, store, &candidate, &foreign));
+    assert(!candidate.shown && foreign.shown);
     assert(candidate.refs == 1 && foreign.refs == 1);
     assert(candidate.selection == 2 && candidate.finalizations == 1 && !foreign.finalizations);
     other->Release();

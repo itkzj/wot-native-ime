@@ -11,7 +11,8 @@ assert ime.ImeStatus() == 0
 assert ime.ImeDiagnostics() == ('focus=0 tip=0 blocked=0 down=0 processKey=0 wanted=0 '
                                 'handled=0 noSink=0 failed=0 composition=0 caret=0/0 draftDetach=0 '
                                 'tsfFlags=0/0x0 uiSamples=0 candidates=0 shown=0 '
-                                'overlay=0/0 choices=0/0x1 imeContext=0/0x0 immCandidate=0/0/0 caretScreen=0,0,0,0')
+                                'overlay=0/0 choices=0/0x1 imeContext=0/0x0 immCandidate=0/0/0 '
+                                'immRead=0/0 mask=0x0 owned=0x0 caretScreen=0,0,0,0')
 assert ime.ImeCandidates() == (0, -1, False, [], u'')
 ime.ImeTick(10, 0)
 assert ime.ImeCandidates() == (0, -1, False, [], u'')

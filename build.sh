@@ -12,7 +12,7 @@ cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
     -o build/_wot_native_ime.pyd -lpython27 -lole32 -loleaut32 -luuid -lcomctl32 -limm32
 "$python" -S test_native_module.py
 "$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -DTEST_CANDIDATE_UI test_text_store.cpp NativeIme.cpp \
-    -o build/test_text_store.exe -lole32 -loleaut32 -luuid
+    -o build/test_text_store.exe -lole32 -loleaut32 -luuid -limm32
 ./build/test_text_store.exe
 "$flex/compc" -source-path=extern -include-classes=net.wg.infrastructure.base.AbstractView \
     -target-player=32.0 -output=build/extern.swc

@@ -8,6 +8,7 @@
 #include <array>
 #include <commctrl.h>
 #include <cstdio>
+#include <cstring>
 #include <imm.h>
 #include <memory>
 #include <new>
@@ -53,7 +54,9 @@ struct State {
     ITfDocumentMgr* document = nullptr;
     ITfDocumentMgr* previous = nullptr;
     ITfContext* context = nullptr;
-    CandidatePage candidates;
+    CandidatePage candidates, immCandidates;
+    DWORD immListMask = 0;
+    bool readingImm = false;
     TextStore* store = nullptr;
     TfClientId client = 0;
     bool coInitialized = false, activated = false, associated = false;
@@ -74,7 +77,8 @@ thread_local struct Diagnostics {
     unsigned overlayRows = 0, overlayClickable = 0, choices = 0;
     HRESULT choiceResult = S_FALSE;
     unsigned immOpen = 0, immChange = 0, immClose = 0, imeSetContext = 0;
-    DWORD imeFlags = 0;
+    DWORD imeFlags = 0, immNotifyMask = 0;
+    unsigned immReads = 0, immPages = 0;
     RECT caret{};
 } diagnostics;
 
@@ -120,6 +124,42 @@ Com<ITfCandidateListUIElementBehavior> candidateBehavior(ITfCandidateListUIEleme
 }
 
 constexpr unsigned MaxCandidateRows = 16;
+constexpr DWORD MaxCandidateBytes = 64 * 1024;
+
+bool readImmPage(const void* buffer, DWORD bytes, CandidatePage& page) {
+    constexpr auto header = offsetof(CANDIDATELIST, dwOffset);
+    CANDIDATELIST list{};
+    if (bytes < sizeof list) return false;
+    std::memcpy(&list, buffer, sizeof list);
+    if (list.dwSize > bytes || list.dwSize < sizeof list ||
+        list.dwCount > (list.dwSize - header) / sizeof(DWORD) ||
+        list.dwPageStart >= list.dwCount || !list.dwPageSize) return false;
+    const auto* data = static_cast<const unsigned char*>(buffer);
+    const auto strings = header + list.dwCount * sizeof(DWORD);
+    page.first = list.dwPageStart;
+    const auto rows = std::min({list.dwCount - list.dwPageStart, list.dwPageSize,
+                                static_cast<DWORD>(MaxCandidateRows)});
+    for (DWORD row = 0; row < rows; ++row) {
+        DWORD offset = 0;
+        std::memcpy(&offset, data + header + (page.first + row) * sizeof(DWORD), sizeof offset);
+        if (offset < strings || offset >= list.dwSize || offset % sizeof(wchar_t)) return false;
+        std::wstring text;
+        bool terminated = false;
+        while (list.dwSize - offset >= sizeof(wchar_t) && text.size() <= 256) {
+            wchar_t character;
+            std::memcpy(&character, data + offset, sizeof character);
+            offset += sizeof character;
+            if (!character) { terminated = true; break; }
+            text.push_back(character);
+        }
+        if (!terminated || text.empty()) return false;
+        page.labels.push_back(std::move(text));
+    }
+    if (list.dwSelection >= page.first && list.dwSelection - page.first < rows)
+        page.selection = static_cast<int>(list.dwSelection - page.first);
+    return true;
+}
+
 bool readCandidatePage(CandidatePage& page) {
     auto& list = *page.list;
     UINT count = 0, pageCount = 0, current = 0;
@@ -186,6 +226,24 @@ std::wstring compositionText(ITfContext* context, const TextStore& store) {
     return text.substr(first, length);
 }
 
+struct ImmContext {
+    HWND window;
+    HIMC handle;
+    explicit ImmContext(HWND window) : window(window), handle(ImmGetContext(window)) {}
+    ~ImmContext() { if (handle) ImmReleaseContext(window, handle); }
+};
+
+std::wstring immText(HWND window, DWORD kind) {
+    const ImmContext imc(window);
+    if (!imc.handle) return {};
+    const LONG bytes = ImmGetCompositionStringW(imc.handle, kind, nullptr, 0);
+    if (bytes <= 0 || bytes > TextStore::Capacity * 2 || bytes % 2 != 0) return {};
+    std::wstring text(bytes / 2, L'\0');
+    if (ImmGetCompositionStringW(imc.handle, kind, text.data(), bytes) != bytes ||
+        text.find(L'\0') != std::wstring::npos) return {};
+    return text;
+}
+
 void sampleCandidateUI() {
     CandidatePage next;
     bool nativeVisible = false;
@@ -208,23 +266,36 @@ void sampleCandidateUI() {
                 const HRESULT result = list->IsShown(&visible);
                 diagnostics.candidates = 1;
                 if (result != S_OK) continue;
+                if (!next.list) {
+                    CandidatePage page;
+                    page.list = std::move(list);
+                    BOOL stillVisible = TRUE;
+                    if (readCandidatePage(page) && (!visible ||
+                        (page.list->Show(FALSE) == S_OK && page.list->IsShown(&stillVisible) == S_OK && !stillVisible))) {
+                        next = std::move(page);
+                        continue;
+                    }
+                }
                 if (visible) {
                     nativeVisible = true;
                     diagnostics.shown = 1;
                     next = CandidatePage{};
                     break;
                 }
-                if (!next.list) {
-                    CandidatePage page;
-                    page.list = std::move(list);
-                    if (readCandidatePage(page)) next = std::move(page);
-                }
             }
             release(element);
         }
     }
-    if (s.store && !nativeVisible) next.preedit = compositionText(s.context, *s.store);
-    if (next.list || !next.preedit.empty()) {
+    if (!next.list && !nativeVisible && s.immListMask) {
+        next.first = s.immCandidates.first;
+        next.selection = s.immCandidates.selection;
+        next.labels = s.immCandidates.labels;
+    }
+    if (!nativeVisible) {
+        if (s.store) next.preedit = compositionText(s.context, *s.store);
+        else if (s.immComposing) next.preedit = immText(s.window, GCS_COMPSTR);
+    }
+    if (!next.labels.empty() || !next.preedit.empty()) {
         const auto& old = s.candidates;
         next.composition = diagnostics.store.composition;
         if (next.list == old.list && next.composition == old.composition && next.first == old.first &&
@@ -257,6 +328,13 @@ bool chooseCandidate(unsigned serial, unsigned row) {
 }
 
 #ifdef TEST_CANDIDATE_UI
+}
+
+bool testImmCandidatePage(const void* buffer, DWORD bytes, bool valid) {
+    CandidatePage page;
+    if (!valid) return !readImmPage(buffer, bytes, page);
+    return readImmPage(buffer, bytes, page) && page.first == 1 && page.selection == 1 &&
+           page.labels == std::vector<std::wstring>{L"\u4f60", L"\u597d"};
 }
 
 std::wstring testPreedit(ITfThreadMgr* manager, ITfContext* context, TextStore* store) {
@@ -317,10 +395,13 @@ HWND gameWindow() {
 
 bool foreground() { return s.window && gameWindow() == s.window; }
 
+void clearImmCandidates();
+
 void detach() {
     if (!s.token && !s.store) return;
     s.token = 0;
     s.candidates = CandidatePage{};
+    clearImmCandidates();
     ++s.attachment;
     if (s.immComposing) {
         s.immComposing = false;
@@ -479,7 +560,7 @@ void sync() {
             return;
         }
         s.attachFailed = false;
-        if (imm) DefWindowProcW(s.window, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL);
+        if (imm) DefWindowProcW(s.window, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL & ~ISC_SHOWUICOMPOSITIONWINDOW);
     } else if (!(s.base == s.sample.draft)) {
         s.base = s.sample.draft;
         if (s.store) s.store->updateDraft(s.base);
@@ -564,17 +645,51 @@ LRESULT CALLBACK getMessage(int code, WPARAM kind, LPARAM param) {
     return CallNextHookEx(nullptr, code, kind, param);
 }
 
+void clearImmCandidates() {
+    s.immCandidates = CandidatePage{};
+    s.immListMask = 0;
+}
+
+DWORD handleImmCandidates(WPARAM notification, DWORD mask) {
+    if (notification == IMN_CLOSECANDIDATE) {
+        const DWORD suppressed = mask & s.immListMask;
+        if (suppressed) clearImmCandidates();
+        return mask & ~suppressed;
+    }
+    if (!foreground() || s.readingImm) return mask;
+    // A successful read owns one list until close. Keep unrelated lists on the default path.
+    if (s.immListMask && !(mask & s.immListMask)) return mask;
+    struct Reading {
+        Reading() { s.readingImm = true; }
+        ~Reading() { s.readingImm = false; }
+    } reading;
+    const auto attachment = s.attachment;
+    const ImmContext imc(s.window);
+    const DWORD wanted = s.immListMask ? s.immListMask : mask;
+    for (DWORD index = 0; imc.handle && index < 32; ++index) {
+        const DWORD bit = DWORD{1} << index;
+        if (!(wanted & bit)) continue;
+        ++diagnostics.immReads;
+        const DWORD bytes = ImmGetCandidateListW(imc.handle, index, nullptr, 0);
+        if (bytes < sizeof(CANDIDATELIST) || bytes > MaxCandidateBytes) continue;
+        std::vector<DWORD> buffer((bytes + sizeof(DWORD) - 1) / sizeof(DWORD));
+        const DWORD copied = ImmGetCandidateListW(imc.handle, index,
+            reinterpret_cast<CANDIDATELIST*>(buffer.data()), bytes);
+        CandidatePage page;
+        if (copied > bytes || !readImmPage(buffer.data(), copied, page)) continue;
+        if (!s.token || s.attachment != attachment || !foreground()) return mask;
+        ++diagnostics.immPages;
+        s.immCandidates = std::move(page);
+        s.immListMask = bit;
+        return mask & ~bit;
+    }
+    if (s.attachment == attachment) clearImmCandidates();
+    return mask;
+}
+
 void immResult(LPARAM flags) {
     if (!(flags & GCS_RESULTSTR)) return;
-    std::wstring text;
-    if (auto imc = ImmGetContext(s.window)) {
-        const LONG bytes = ImmGetCompositionStringW(imc, GCS_RESULTSTR, nullptr, 0);
-        if (bytes > 0 && bytes <= TextStore::Capacity * 2 && bytes % 2 == 0) {
-            text.resize(bytes / 2);
-            if (ImmGetCompositionStringW(imc, GCS_RESULTSTR, text.data(), bytes) != bytes) text.clear();
-        }
-        ImmReleaseContext(s.window, imc);
-    }
+    const auto text = immText(s.window, GCS_RESULTSTR);
     if (text.empty()) return;
     Draft next = s.base;
     next.text.replace(next.first, next.last - next.first, text);
@@ -588,10 +703,19 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
     if (w && message == WM_IME_SETCONTEXT) {
         ++diagnostics.imeSetContext;
         diagnostics.imeFlags = static_cast<DWORD>(l);
-    } else if (message == WM_IME_NOTIFY) {
+    } else if (message == WM_IME_NOTIFY && (w == IMN_OPENCANDIDATE || w == IMN_CHANGECANDIDATE ||
+                                           w == IMN_CLOSECANDIDATE)) {
         if (w == IMN_OPENCANDIDATE) ++diagnostics.immOpen;
         if (w == IMN_CHANGECANDIDATE) ++diagnostics.immChange;
         if (w == IMN_CLOSECANDIDATE) ++diagnostics.immClose;
+        diagnostics.immNotifyMask = static_cast<DWORD>(l);
+        if (s.token) {
+            try {
+                const DWORD mask = handleImmCandidates(w, diagnostics.immNotifyMask);
+                if (mask != static_cast<DWORD>(l))
+                    return mask ? DefWindowProcW(window, message, w, mask) : 0;
+            } catch (...) { clearImmCandidates(); }
+        }
     }
     if (message == WM_NCDESTROY) {
         if (!s.busy) { Busy busy; detach(); }
@@ -608,6 +732,7 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
         case WM_IME_CHAR:
             return 0; // GCS_RESULTSTR and TSF are the sole writers.
         case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
+            if (message == WM_IME_ENDCOMPOSITION) clearImmCandidates();
             if (!s.busy && s.imm) {
                 Busy busy;
                 try {
@@ -621,14 +746,13 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
                     }
                 } catch (...) { detach(); }
             }
-            // IMM shows composition and candidates via the default IME window.
-            // Do not give result text to DefWindowProc, which can synthesize WM_IME_CHAR.
-            if (s.imm && !(message == WM_IME_COMPOSITION && (l & GCS_RESULTSTR)))
-                return DefWindowProcW(window, message, w, l);
-            if (s.imm && (l & GCS_COMPSTR))
-                return DefWindowProcW(window, message, w, l & ~static_cast<LPARAM>(GCS_RESULTSTR));
-            return 0;
-        case WM_IME_SETCONTEXT: case WM_IME_NOTIFY:
+            return 0; // The mod renders preedit and owns confirmed text.
+        case WM_IME_SETCONTEXT: {
+            const DWORD hidden = (s.immListMask & ISC_SHOWUIALLCANDIDATEWINDOW) |
+                                 (s.imm ? ISC_SHOWUICOMPOSITIONWINDOW : 0);
+            return DefWindowProcW(window, message, w, l & ~static_cast<LPARAM>(hidden));
+        }
+        case WM_IME_NOTIFY:
             return DefWindowProcW(window, message, w, l);
         }
     }
@@ -831,12 +955,13 @@ PyObject* diagnosticsPython(PyObject*, PyObject*) {
                   "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u "
                   "composition=%u caret=%u/%u draftDetach=%u tsfFlags=%d/0x%lx uiSamples=%u candidates=%u shown=%u "
                   "overlay=%u/%u choices=%u/0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u "
-                  "caretScreen=%ld,%ld,%ld,%ld",
+                  "immRead=%u/%u mask=0x%lx owned=0x%lx caretScreen=%ld,%ld,%ld,%ld",
                   ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
                   d.store.composition, d.store.textExtOk, d.store.textExt, d.draftDetach, flagsKnown, flags,
                   d.uiSamples, d.candidates, d.shown, d.overlayRows, d.overlayClickable, d.choices,
                   static_cast<DWORD>(d.choiceResult), d.imeSetContext, d.imeFlags,
-                  d.immOpen, d.immChange, d.immClose, d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
+                  d.immOpen, d.immChange, d.immClose, d.immReads, d.immPages, d.immNotifyMask, s.immListMask,
+                  d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
     return PyString_FromString(report);
 }
 
