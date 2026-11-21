@@ -1,10 +1,13 @@
 package {
     import flash.display.DisplayObject;
+    import flash.display.GradientType;
+    import flash.display.Graphics;
     import flash.display.Sprite;
     import flash.display.Stage;
     import flash.events.Event;
     import flash.events.FocusEvent;
     import flash.events.MouseEvent;
+    import flash.geom.Matrix;
     import flash.geom.Point;
     import flash.geom.Rectangle;
     import flash.system.ApplicationDomain;
@@ -36,6 +39,7 @@ package {
         private var candidatePanel:Sprite;
         private var candidateStage:Stage;
         private var candidateLabels:Array;
+        private var preeditText:String;
         private var candidateSerial:uint;
         private var candidateSelection:int = -1;
         private var candidateLimit:Number;
@@ -189,9 +193,10 @@ package {
                 normalized(viewport.right, screen.width), normalized(viewport.bottom, screen.height)];
         }
 
-        public function as_candidates(serial:uint, selection:int, clickable:Boolean, labels:Array):void {
+        public function as_candidates(serial:uint, selection:int, clickable:Boolean, labels:Array, preedit:String):void {
             var movie:Stage = focused();
-            if (!field || serial == 0 || !labels || labels.length == 0 || labels.length > 16) {
+            if (!field || serial == 0 || !labels || labels.length > 16 || !preedit && labels.length == 0 ||
+                preedit && preedit.length > 8192) {
                 hideCandidates();
                 return;
             }
@@ -207,6 +212,7 @@ package {
                     if (!(label is String) || label.length > 256) return;
                 }
                 candidateLabels = labels.concat();
+                preeditText = preedit;
                 candidateSerial = serial;
                 candidatePanel = new Sprite();
                 candidatePanel.mouseChildren = false;
@@ -251,6 +257,7 @@ package {
             candidatePanel = null;
             candidateStage = null;
             candidateLabels = null;
+            preeditText = null;
             candidateSerial = 0;
             candidateSelection = -1;
             pressedRow = -1;
@@ -281,18 +288,19 @@ package {
             candidateLimit = limit;
             pressedRow = -1;
             while (candidatePanel.numChildren) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
-            var format:TextFormat = new TextFormat("Microsoft YaHei", 16, 0xF5F1E5);
+            var format:TextFormat = new TextFormat("Microsoft YaHei", 14, 0xDCD8CB);
+            var preeditFormat:TextFormat = new TextFormat("Microsoft YaHei", 14, 0xF1E7C8, true);
             candidateWidth = Math.min(100, limit);
-            candidateHeight = 4;
-            for (var index:int = 0; index < candidateLabels.length; ++index) {
+            candidateHeight = 3;
+            for (var index:int = preeditText ? -1 : 0; index < candidateLabels.length; ++index) {
                 var text:TextField = new TextField();
                 text.embedFonts = false;
                 text.selectable = false;
                 text.multiline = true;
                 text.autoSize = TextFieldAutoSize.LEFT;
-                text.defaultTextFormat = format;
-                text.text = candidateLabels[index];
-                if (index < 9) text.text = (index + 1) + ". " + text.text;
+                text.defaultTextFormat = index < 0 ? preeditFormat : format;
+                text.text = index < 0 ? preeditText : candidateLabels[index];
+                if (index >= 0 && index < 9) text.text = (index + 1) + ". " + text.text;
                 text.x = 8;
                 text.y = candidateHeight;
                 if (text.width > limit - 16) {
@@ -300,27 +308,43 @@ package {
                     text.width = limit - 16;
                 }
                 candidateWidth = Math.max(candidateWidth, Math.ceil(text.width) + 16);
-                candidateHeight += Math.max(26, Math.ceil(text.height));
+                candidateHeight += rowHeight(text);
                 candidatePanel.addChild(text);
             }
-            candidateHeight += 4;
+            candidateHeight += 3;
             paintCandidates();
         }
 
+        private function rowHeight(text:TextField):Number {
+            return Math.max(22, Math.ceil(text.height));
+        }
+
         private function paintCandidates():void {
-            candidatePanel.graphics.clear();
-            candidatePanel.graphics.beginFill(0x1B2619);
-            candidatePanel.graphics.drawRect(0, 0, candidateWidth, candidateHeight);
-            candidatePanel.graphics.endFill();
-            if (candidateSelection < 0) return;
-            var text:TextField = candidatePanel.getChildAt(candidateSelection) as TextField;
-            var height:Number = Math.max(26, Math.ceil(text.height));
-            candidatePanel.graphics.beginFill(0x384B2C);
-            candidatePanel.graphics.drawRect(0, text.y, candidateWidth, height);
-            candidatePanel.graphics.endFill();
-            candidatePanel.graphics.beginFill(0xF7D267);
-            candidatePanel.graphics.drawRect(0, text.y, 4, height);
-            candidatePanel.graphics.endFill();
+            var graphics:Graphics = candidatePanel.graphics;
+            graphics.clear();
+            var fill:Matrix = new Matrix();
+            fill.createGradientBox(candidateWidth, candidateHeight, Math.PI / 2);
+            graphics.beginGradientFill(GradientType.LINEAR, [0x414032, 0x23231D, 0x1B1B17],
+                [1, 1, 1], [0, 86, 255], fill);
+            graphics.drawRect(0, 0, candidateWidth, candidateHeight);
+            graphics.endFill();
+            if (preeditText && candidateLabels.length) {
+                var header:TextField = candidatePanel.getChildAt(0) as TextField;
+                graphics.beginFill(0x66614B);
+                graphics.drawRect(6, header.y + rowHeight(header) - 1, candidateWidth - 12, 1);
+                graphics.endFill();
+            }
+            if (candidateSelection >= 0) {
+                var text:TextField = candidatePanel.getChildAt(candidateSelection + (preeditText ? 1 : 0)) as TextField;
+                graphics.beginFill(0x54513E);
+                graphics.drawRect(1, text.y, candidateWidth - 2, rowHeight(text));
+                graphics.endFill();
+                graphics.beginFill(0xA69A69);
+                graphics.drawRect(1, text.y, 2, rowHeight(text));
+                graphics.endFill();
+            }
+            graphics.lineStyle(1, 0x6E6952);
+            graphics.drawRect(0.5, 0.5, candidateWidth - 1, candidateHeight - 1);
         }
 
         private function preserveFieldFocus(event:FocusEvent):void {
@@ -332,9 +356,10 @@ package {
         }
 
         private function candidateRow(y:Number):int {
-            for (var i:int = 0; i < candidatePanel.numChildren; ++i) {
+            var offset:int = preeditText ? 1 : 0;
+            for (var i:int = offset; i < candidatePanel.numChildren; ++i) {
                 var text:TextField = candidatePanel.getChildAt(i) as TextField;
-                if (y >= text.y && y < text.y + Math.max(26, Math.ceil(text.height))) return i;
+                if (y >= text.y && y < text.y + rowHeight(text)) return i - offset;
             }
             return -1;
         }

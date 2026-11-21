@@ -34,7 +34,7 @@ _diag_budget = 40
 _diag_ticks = 0
 _diag_last = None
 _candidate_display = None
-_EMPTY_CANDIDATES = (0, -1, False, [])
+_EMPTY_CANDIDATES = (0, -1, False, [], u'')
 
 
 def _error(where):
@@ -258,7 +258,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V9 mod loaded')
+        print('[WotNativeIme] V10 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

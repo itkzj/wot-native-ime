@@ -38,6 +38,7 @@ struct CandidatePage {
     int selection = -1;
     bool clickable = false;
     std::vector<std::wstring> labels;
+    std::wstring preedit;
 };
 
 struct State {
@@ -152,8 +153,42 @@ bool readCandidatePage(CandidatePage& page) {
     return true;
 }
 
+std::wstring compositionText(ITfContext* context, const TextStore& store) {
+    if (!context || !store.composing) return {};
+    ITfContextComposition* composition = nullptr;
+    if (context->QueryInterface(__uuidof(ITfContextComposition), reinterpret_cast<void**>(&composition)) != S_OK)
+        return {};
+    IEnumITfCompositionView* views = nullptr;
+    const HRESULT enumerated = composition->EnumCompositions(&views);
+    composition->Release();
+    Com<IEnumITfCompositionView> ownedViews(views);
+    if (enumerated != S_OK || !views) return {};
+
+    ITfCompositionView* view = nullptr;
+    ULONG fetched = 0;
+    const HRESULT found = views->Next(1, &view, &fetched);
+    Com<ITfCompositionView> ownedView(view);
+    if (found != S_OK || fetched != 1 || !view) return {};
+    ITfRange* range = nullptr;
+    const HRESULT ranged = view->GetRange(&range);
+    Com<ITfRange> ownedRange(range);
+    if (ranged != S_OK || !range) return {};
+    ITfRangeACP* acp = nullptr;
+    const HRESULT queried = range->QueryInterface(__uuidof(ITfRangeACP), reinterpret_cast<void**>(&acp));
+    Com<ITfRangeACP> ownedAcp(acp);
+    if (queried != S_OK || !acp) return {};
+
+    LONG first = 0, length = 0;
+    const auto& text = store.draft.text;
+    if (acp->GetExtent(&first, &length) != S_OK || first < 0 || length <= 0 ||
+        static_cast<size_t>(first) > text.size() || static_cast<size_t>(length) > text.size() - first)
+        return {};
+    return text.substr(first, length);
+}
+
 void sampleCandidateUI() {
     CandidatePage next;
+    bool nativeVisible = false;
     if (s.store && s.store->composing) {
         auto* ui = uiManager();
         IEnumTfUIElements* raw = nullptr;
@@ -174,6 +209,7 @@ void sampleCandidateUI() {
                 diagnostics.candidates = 1;
                 if (result != S_OK) continue;
                 if (visible) {
+                    nativeVisible = true;
                     diagnostics.shown = 1;
                     next = CandidatePage{};
                     break;
@@ -187,11 +223,12 @@ void sampleCandidateUI() {
             release(element);
         }
     }
-    if (next.list) {
+    if (s.store && !nativeVisible) next.preedit = compositionText(s.context, *s.store);
+    if (next.list || !next.preedit.empty()) {
         const auto& old = s.candidates;
         next.composition = diagnostics.store.composition;
         if (next.list == old.list && next.composition == old.composition && next.first == old.first &&
-            next.labels == old.labels && next.clickable == old.clickable) {
+            next.labels == old.labels && next.clickable == old.clickable && next.preedit == old.preedit) {
             next.serial = old.serial;
         } else {
             if (++candidateSerial == 0) ++candidateSerial;
@@ -220,6 +257,17 @@ bool chooseCandidate(unsigned serial, unsigned row) {
 }
 
 #ifdef TEST_CANDIDATE_UI
+}
+
+std::wstring testPreedit(ITfThreadMgr* manager, ITfContext* context, TextStore* store) {
+    s.manager = manager;
+    s.context = context;
+    s.store = store;
+    sampleCandidateUI();
+    auto text = std::move(s.candidates.preedit);
+    const bool visible = s.candidates.serial && s.candidates.labels.empty() && !s.candidates.clickable;
+    s = State{};
+    return visible ? std::move(text) : std::wstring{};
 }
 
 bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore* store,
@@ -763,7 +811,8 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
         if (!label) { Py_DECREF(labels); return nullptr; }
         PyList_SET_ITEM(labels, i, label);
     }
-    return Py_BuildValue("(IiON)", page.serial, page.selection, page.clickable ? Py_True : Py_False, labels);
+    return Py_BuildValue("(IiONu#)", page.serial, page.selection, page.clickable ? Py_True : Py_False, labels,
+                         page.preedit.c_str(), static_cast<Py_ssize_t>(page.preedit.size()));
 }
 
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }

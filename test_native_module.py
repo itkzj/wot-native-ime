@@ -12,9 +12,9 @@ assert ime.ImeDiagnostics() == ('focus=0 tip=0 blocked=0 down=0 processKey=0 wan
                                 'handled=0 noSink=0 failed=0 composition=0 caret=0/0 draftDetach=0 '
                                 'tsfFlags=0/0x0 uiSamples=0 candidates=0 shown=0 '
                                 'overlay=0/0 choices=0/0x1 imeContext=0/0x0 immCandidate=0/0/0 caretScreen=0,0,0,0')
-assert ime.ImeCandidates() == (0, -1, False, [])
+assert ime.ImeCandidates() == (0, -1, False, [], u'')
 ime.ImeTick(10, 0)
-assert ime.ImeCandidates() == (0, -1, False, [])
+assert ime.ImeCandidates() == (0, -1, False, [], u'')
 try:
     ime.ImeStart(None, None)
 except TypeError:

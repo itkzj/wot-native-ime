@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdio>
 
+std::wstring testPreedit(ITfThreadMgr*, ITfContext*, TextStore*);
 bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*);
 
 struct Candidate final : ITfCandidateListUIElementBehavior {
@@ -84,6 +85,7 @@ int main() {
     struct Insert final : ITfEditSession, ITfCompositionSink {
         ITfContext* ctx;
         TextStore* store;
+        ITfComposition* composition = nullptr;
         Insert(ITfContext* context, TextStore* textStore) : ctx(context), store(textStore) {}
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
             if (iid == __uuidof(IUnknown) || iid == __uuidof(ITfEditSession)) *out = static_cast<ITfEditSession*>(this);
@@ -97,11 +99,23 @@ int main() {
         ULONG STDMETHODCALLTYPE Release() override { return --refs; }
         HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie, ITfComposition*) override { return S_OK; }
         HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie token) override {
+            if (composition) {
+                ITfRange* range = nullptr;
+                HRESULT result = composition->GetRange(&range);
+                if (SUCCEEDED(result)) {
+                    result = range->SetText(token, 0, L"\u4f60\u597d", 2);
+                    range->Release();
+                }
+                if (SUCCEEDED(result)) result = composition->EndComposition(token);
+                composition->Release();
+                composition = nullptr;
+                return result;
+            }
             ITfInsertAtSelection* insertion = nullptr;
             HRESULT result = ctx->QueryInterface(__uuidof(ITfInsertAtSelection), reinterpret_cast<void**>(&insertion));
             if (FAILED(result)) return result;
             ITfRange* range = nullptr;
-            result = insertion->InsertTextAtSelection(token, 0, L"\u4f60\u597d", 2, &range);
+            result = insertion->InsertTextAtSelection(token, 0, L"nihao", 5, &range);
             insertion->Release();
             if (FAILED(result)) {
                 std::fprintf(stderr, "TSF insertion: 0x%08lx\n", static_cast<unsigned long>(result));
@@ -110,14 +124,9 @@ int main() {
             ITfContextComposition* owner = nullptr;
             result = ctx->QueryInterface(__uuidof(ITfContextComposition), reinterpret_cast<void**>(&owner));
             if (SUCCEEDED(result)) {
-                ITfComposition* composition = nullptr;
                 result = owner->StartComposition(token, range, this, &composition);
                 if (FAILED(result)) std::fprintf(stderr, "TSF StartComposition: 0x%08lx\n", static_cast<unsigned long>(result));
-                if (SUCCEEDED(result)) {
-                    assert(composition && store->composing);
-                    result = composition->EndComposition(token);
-                    composition->Release();
-                }
+                if (SUCCEEDED(result)) assert(composition && store->composing);
                 owner->Release();
             }
             range->Release();
@@ -128,6 +137,10 @@ int main() {
     assert(SUCCEEDED(context->RequestEditSession(id, &insert, TF_ES_SYNC | TF_ES_READWRITE, &outcome)));
     if (FAILED(outcome)) std::fprintf(stderr, "TSF edit session result: 0x%08lx\n", static_cast<unsigned long>(outcome));
     assert(SUCCEEDED(outcome));
+    assert(testPreedit(manager, context, store) == L"nihao");
+    assert(SUCCEEDED(context->RequestEditSession(id, &insert, TF_ES_SYNC | TF_ES_READWRITE, &outcome)));
+    assert(SUCCEEDED(outcome));
+    assert(testPreedit(manager, context, store).empty());
     assert(store->draft.text == L"a\u4f60\u597dc" && store->draft.first == 3 && store->draft.last == 3);
     assert(!store->composing && store->finishedComposition);
 
