@@ -50,6 +50,7 @@ package {
         private var pendingChoice:Array;
         private var stockImeWindows:Array = [];
         private var stockFocusStage:Stage;
+        private var watchFocus:Boolean;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -80,14 +81,13 @@ package {
         private function bridgeStageChanged(event:Event):void {
             if (event.target !== this) return;
             bridgeDetached = event.type == Event.REMOVED_FROM_STAGE;
-            if (bridgeDetached) {
-                as_watchFocus(false);
-                setField(null);
-            }
+            as_watchFocus(watchFocus);
+            if (bridgeDetached) setField(null);
         }
 
         public function as_watchFocus(enabled:Boolean):void {
-            var movie:Stage = enabled ? inputStage() : null;
+            watchFocus = enabled;
+            var movie:Stage = enabled && !bridgeDetached ? inputStage() : null;
             if (movie !== stockFocusStage) {
                 if (stockFocusStage) stockFocusStage.removeEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true);
                 stockFocusStage = movie;
@@ -145,7 +145,7 @@ package {
         }
 
         private function ownerHas(node:Object, cls:String, slot:String, target:DisplayObject):Boolean {
-            if (!domain.hasDefinition(cls) || !(slot in node) || node[slot] !== target) return false;
+            if (!(slot in node) || !domain.hasDefinition(cls) || node[slot] !== target) return false;
             var type:Class = domain.getDefinition(cls) as Class;
             return node is type;
         }
@@ -211,8 +211,9 @@ package {
         }
 
         private function visibleCaret(movie:Stage, viewport:Rectangle):Rectangle {
+            if (viewport.isEmpty()) return null;
             var caret:Rectangle = caretLocal(field.caretIndex);
-            if (!caret || viewport.isEmpty()) return null;
+            if (!caret) return null;
             var a:Point = movie.globalToLocal(field.localToGlobal(caret.topLeft));
             var b:Point = movie.globalToLocal(field.localToGlobal(caret.bottomRight));
             if (a.x < viewport.left - 1 || a.x > viewport.right + 1 ||

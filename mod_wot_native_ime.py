@@ -30,9 +30,6 @@ _status = None
 _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attached',
                   3: 'IMM attached', 4: 'TSF association failed'}
 _errors = set()
-_diag_budget = 40
-_diag_ticks = 0
-_diag_last = None
 _candidate_display = None
 _stock_hidden = None
 _EMPTY_CANDIDATES = (0, -1, False, [], u'')
@@ -136,7 +133,7 @@ def _update_stock_status(view):
 
 
 def _tick():
-    global _tick_id, _status, _diag_budget, _diag_ticks, _diag_last
+    global _tick_id, _status
     _tick_id = None
     view = _active()
     if not _enabled or view is None:
@@ -155,23 +152,13 @@ def _tick():
             else:
                 serial, row = map(int, choice)
                 _library.ImeTick(serial, row)
-        _update_candidates(view, _library.ImeCandidates() if attached else _EMPTY_CANDIDATES)
         status = _library.ImeStatus()
+        page = _library.ImeCandidates() if attached and status in (2, 3) else _EMPTY_CANDIDATES
+        _update_candidates(view, page)
         _update_stock_status(view if status in (1, 2, 3) else None)
         if status != _status:
             _status = status
             print('[WotNativeIme] ' + _status_labels[status])
-        if status in (2, 3, 4) and _diag_budget:
-            # Sample about twice a second and log only changes.
-            if _diag_ticks == 0:
-                report = _library.ImeDiagnostics()
-                if report != _diag_last:
-                    print('[WotNativeIme] TSF diagnostic ' + report)
-                    _diag_last = report
-                    _diag_budget -= 1
-            _diag_ticks = (_diag_ticks + 1) % 32
-        else:
-            _diag_ticks = 0
     except Exception:
         _error('Native input host unavailable')
         attached = False
@@ -278,7 +265,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V17 mod loaded')
+        print('[WotNativeIme] V1.0 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

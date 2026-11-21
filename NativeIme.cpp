@@ -70,19 +70,6 @@ struct State {
 };
 thread_local State s;
 thread_local unsigned candidateSerial = 0;
-thread_local struct Diagnostics {
-    TextStore::Activity store;
-    unsigned blocked = 0, keyDown = 0, processKey = 0, wanted = 0, eaten = 0, noSink = 0, failed = 0;
-    unsigned draftDetach = 0, uiSamples = 0, candidates = 0, shown = 0;
-    unsigned overlayRows = 0, overlayClickable = 0, choices = 0;
-    HRESULT choiceResult = S_FALSE;
-    unsigned immOpen = 0, immChange = 0, immClose = 0, imeSetContext = 0;
-    DWORD imeFlags = 0, immNotifyMask = 0;
-    unsigned immReads = 0, immPages = 0, queuedCandidates = 0;
-    bool segmented = false;
-    RECT caret{};
-} diagnostics;
-
 struct Busy {
     Busy() { s.busy = true; }
     ~Busy() { s.busy = false; }
@@ -92,6 +79,7 @@ template<class T> void release(T*& value) {
     if (value) { auto* old = value; value = nullptr; old->Release(); }
 }
 
+#ifdef TEST_CANDIDATE_UI
 bool activeTsfFlags(DWORD& flags) {
     ITfThreadMgrEx* managerEx = nullptr;
     const bool known = s.manager &&
@@ -100,6 +88,7 @@ bool activeTsfFlags(DWORD& flags) {
     release(managerEx);
     return known;
 }
+#endif
 
 ITfUIElementMgr* uiManager() {
     ITfUIElementMgr* ui = nullptr;
@@ -244,92 +233,27 @@ std::wstring immText(HIMC handle, DWORD kind) {
     return text;
 }
 
-bool readingMatches(const std::wstring& text, const std::wstring& reading) {
-    size_t pos = 0;
-    for (const auto ch : reading) {
-        if (ch == L'\'' || ch == L'\u2019' || ch == L' ') continue;
-        if (pos == text.size() || text[pos++] != ch) return false;
-    }
-    return pos == text.size();
-}
-
-std::wstring withClauseSeparators(const std::wstring& text, const std::vector<DWORD>& offsets) {
-    if (offsets.size() < 3 || offsets.front() != 0 || offsets.back() != text.size() ||
-        text.size() + offsets.size() - 2 > TextStore::Capacity) return text;
-    std::wstring separated;
-    for (size_t i = 1; i < offsets.size(); ++i) {
-        if (offsets[i] <= offsets[i - 1] || offsets[i] > text.size()) return text;
-        if (i > 1) separated += L'\'';
-        separated.append(text, offsets[i - 1], offsets[i] - offsets[i - 1]);
-    }
-    return separated;
-}
-
-std::wstring immClausePreview(HIMC handle, const std::wstring& text, DWORD kind) {
-    const LONG bytes = ImmGetCompositionStringW(handle, kind, nullptr, 0);
-    const LONG unit = static_cast<LONG>(sizeof(DWORD));
-    if (bytes < 3 * unit || bytes % unit || static_cast<size_t>(bytes / unit) > text.size() + 1) return text;
-    std::vector<DWORD> offsets(bytes / unit);
-    if (ImmGetCompositionStringW(handle, kind, offsets.data(), bytes) != bytes) return text;
-    return withClauseSeparators(text, offsets);
-}
-
-std::wstring immPreedit(HIMC handle, const std::wstring& text) {
-    if (text.empty() || text.find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::wstring::npos)
-        return text;
-    const auto reading = immText(handle, GCS_COMPREADSTR);
-    if (reading.size() > text.size() && readingMatches(text, reading)) return reading;
-    if (reading == text) {
-        auto segmented = immClausePreview(handle, text, GCS_COMPREADCLAUSE);
-        if (segmented != text) return segmented;
-    }
-    return immText(handle, GCS_COMPSTR) == text ? immClausePreview(handle, text, GCS_COMPCLAUSE) : text;
-}
-
-std::wstring tsfReading(ITfUIElement* element, const std::wstring& text) {
-    if (!s.context || text.empty()) return {};
-    ITfReadingInformationUIElement* raw = nullptr;
-    if (element->QueryInterface(readingInformationId, reinterpret_cast<void**>(&raw)) != S_OK || !raw) return {};
-    Com<ITfReadingInformationUIElement> reading(raw);
-    ITfContext* owner = nullptr;
-    const bool ours = reading->GetContext(&owner) == S_OK && owner == s.context;
-    release(owner);
-    if (!ours) return {};
-    BSTR value = nullptr;
-    const auto result = reading->GetString(&value);
-    std::unique_ptr<wchar_t, decltype(&SysFreeString)> buffer(value, &SysFreeString);
-    const auto length = SysStringLen(value);
-    if (result != S_OK || length <= text.size() || length > TextStore::Capacity) return {};
-    std::wstring preview(value, length);
-    return readingMatches(text, preview) ? std::move(preview) : std::wstring{};
-}
-
 bool composing() { return s.store ? s.store->composing : s.immComposing; }
 
 void sampleCandidateUI() {
     CandidatePage next;
-    std::wstring preedit, reading;
     bool nativeVisible = false;
     if (s.store && s.store->composing) {
-        preedit = compositionText(s.context, *s.store);
         auto* ui = uiManager();
         IEnumTfUIElements* raw = nullptr;
         if (ui) ui->EnumUIElements(&raw);
         release(ui);
         Com<IEnumTfUIElements> elements(raw);
         if (elements) {
-            ++diagnostics.uiSamples;
             ITfUIElement* element = nullptr;
             ULONG fetched = 0;
             while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
                 Com<ITfUIElement> owned(element);
-                if (reading.empty()) reading = tsfReading(element, preedit);
                 auto list = ownedCandidate(element);
                 element = nullptr;
                 if (!list) continue;
                 BOOL visible = FALSE;
                 const HRESULT result = list->IsShown(&visible);
-                diagnostics.candidates = 1;
                 if (result != S_OK) continue;
                 if (!next.list) {
                     CandidatePage page;
@@ -343,7 +267,6 @@ void sampleCandidateUI() {
                 }
                 if (visible) {
                     nativeVisible = true;
-                    diagnostics.shown = 1;
                     next = CandidatePage{};
                     break;
                 }
@@ -356,23 +279,16 @@ void sampleCandidateUI() {
         next.selection = s.immCandidates.selection;
         next.labels = s.immCandidates.labels;
     }
-    diagnostics.segmented = false;
     if (!nativeVisible) {
-        diagnostics.segmented = !reading.empty();
-        next.preedit = reading.empty() ? std::move(preedit) : std::move(reading);
-        if (!diagnostics.segmented && (s.immComposing || (s.immListMask && !next.preedit.empty()))) {
+        if (s.store) next.preedit = compositionText(s.context, *s.store);
+        else if (s.immComposing) {
             const ImmContext imc(s.window);
-            if (imc.handle) {
-                if (!s.store) next.preedit = immText(imc.handle, GCS_COMPSTR);
-                const auto rawLength = next.preedit.size();
-                next.preedit = immPreedit(imc.handle, std::move(next.preedit));
-                diagnostics.segmented = next.preedit.size() > rawLength;
-            }
+            next.preedit = immText(imc.handle, GCS_COMPSTR);
         }
     }
     if (!next.labels.empty() || !next.preedit.empty()) {
         const auto& old = s.candidates;
-        next.composition = diagnostics.store.composition;
+        next.composition = s.store ? s.store->composition : 0;
         if (next.list == old.list && next.composition == old.composition && next.first == old.first &&
             next.labels == old.labels && next.clickable == old.clickable && next.preedit == old.preedit) {
             next.serial = old.serial;
@@ -380,8 +296,6 @@ void sampleCandidateUI() {
             if (++candidateSerial == 0) ++candidateSerial;
             next.serial = candidateSerial;
         }
-        diagnostics.overlayRows = static_cast<unsigned>(next.labels.size());
-        diagnostics.overlayClickable = next.clickable;
     }
     s.candidates = std::move(next);
 }
@@ -393,11 +307,8 @@ bool chooseCandidate(unsigned serial, unsigned row) {
     auto behavior = candidateBehavior(page.list.get());
     if (!behavior) return false;
     const UINT index = page.first + row;
-    ++diagnostics.choices;
-    diagnostics.choiceResult = behavior->SetSelection(index);
-    if (diagnostics.choiceResult != S_OK) return false;
-    if (s.store->composing) diagnostics.choiceResult = behavior->Finalize();
-    if (diagnostics.choiceResult != S_OK) return false;
+    if (behavior->SetSelection(index) != S_OK) return false;
+    if (s.store->composing && behavior->Finalize() != S_OK) return false;
     s.candidates = CandidatePage{};
     return true;
 }
@@ -413,10 +324,6 @@ bool testImmCandidatePage(const void* buffer, DWORD bytes, bool valid) {
 }
 
 bool testImmPreview() {
-    const std::wstring raw = L"nihao";
-    if (!readingMatches(raw, L"ni'hao") || readingMatches(raw, L"ni'huo") ||
-        withClauseSeparators(raw, {0, 2, 5}) != L"ni'hao" ||
-        withClauseSeparators(raw, {0, 2, 1, 5}) != raw) return false;
     s.imm = true;
     s.immComposing = true;
     s.immListMask = 1;
@@ -464,9 +371,12 @@ bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore*
                   s.candidates.selection == 1 && s.candidates.clickable &&
                   s.candidates.labels == std::vector<std::wstring>{L"\u6d4b", L"\u8bd5"};
         sampleCandidateUI();
-        success = success && s.candidates.serial == serial &&
-                  !chooseCandidate(serial + 1, 0) && !chooseCandidate(serial, 2) &&
-                  chooseCandidate(serial, 0) && !s.candidates.serial;
+        success = success && s.candidates.serial == serial && !chooseCandidate(serial, 2);
+        ++store->composition; // A new composition may reuse the very same list and labels.
+        sampleCandidateUI();
+        const auto current = s.candidates.serial;
+        success = success && current && current != serial && !chooseCandidate(serial, 0) &&
+                  chooseCandidate(current, 0) && !s.candidates.serial;
         if (ownStarted && ui->EndUIElement(ownId) != S_OK) success = false;
         if (foreignStarted && ui->EndUIElement(foreignId) != S_OK) success = false;
         sampleCandidateUI();
@@ -536,7 +446,7 @@ void locate();
 
 bool attachTsf() {
     if (!s.manager) return false;
-    s.store = new (std::nothrow) TextStore(s.window, s.base, &diagnostics.store);
+    s.store = new (std::nothrow) TextStore(s.window, s.base);
     if (!s.store) return false;
     locate();
     TfEditCookie cookie;
@@ -578,8 +488,8 @@ void locate() {
         POINT last{MulDiv(client.right, r[6], 10000), MulDiv(client.bottom, r[7], 10000)};
         if (ClientToScreen(s.window, &a) && ClientToScreen(s.window, &b) &&
             ClientToScreen(s.window, &first) && ClientToScreen(s.window, &last)) {
-            diagnostics.caret = {a.x, a.y, b.x, b.y};
-            s.store->layout(diagnostics.caret, {first.x, first.y, last.x, last.y});
+            const RECT caret{a.x, a.y, b.x, b.y};
+            s.store->layout(caret, {first.x, first.y, last.x, last.y});
         }
     }
 }
@@ -638,7 +548,6 @@ void sync() {
     const bool imm = legacy(keyboard);
     const bool draftChangedDuringComposition = s.token && (s.immComposing || (s.store && s.store->composing)) &&
                                                !(s.base == s.sample.draft) && s.token == s.sample.token;
-    if (draftChangedDuringComposition) ++diagnostics.draftDetach;
     if (s.token && (s.token != s.sample.token || s.keyboard != keyboard || s.imm != imm ||
                     draftChangedDuringComposition)) detach();
     if (!s.sample.token) return;
@@ -667,7 +576,6 @@ void handleKey(MSG& msg) {
     const bool up = msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP;
     if (!up && !down) return;
     if (msg.hwnd != s.window || !foreground()) {
-        if (down && s.store) ++diagnostics.blocked;
         return;
     }
     const auto originalKey = msg.wParam;
@@ -682,27 +590,14 @@ void handleKey(MSG& msg) {
     sync();
     bool eaten = false;
     if (s.store && s.keys) {
-        if (down) {
-            ++diagnostics.keyDown;
-            if (originalKey == VK_PROCESSKEY) ++diagnostics.processKey;
-        }
         const bool wasComposing = s.store->composing;
         BOOL wants = FALSE, handled = FALSE;
         const HRESULT test = down ? s.keys->TestKeyDown(msg.wParam, msg.lParam, &wants)
                                   : s.keys->TestKeyUp(msg.wParam, msg.lParam, &wants);
-        if (down) {
-            if (test == S_FALSE) ++diagnostics.noSink;
-            if (FAILED(test)) ++diagnostics.failed;
-        }
         if (test == S_OK && wants) {
             const HRESULT result = down ? s.keys->KeyDown(msg.wParam, msg.lParam, &handled)
                                         : s.keys->KeyUp(msg.wParam, msg.lParam, &handled);
             eaten = result == S_OK && handled;
-            if (down) {
-                ++diagnostics.wanted;
-                if (eaten) ++diagnostics.eaten;
-                if (FAILED(result)) ++diagnostics.failed;
-            }
         }
         if (down && key == VK_RETURN && wasComposing) eaten = true;
         if (down && key == VK_ESCAPE && wasComposing) {
@@ -768,7 +663,6 @@ DWORD handleImmCandidates(WPARAM notification, DWORD mask) {
     for (DWORD index = 0; imc.handle && index < 32; ++index) {
         const DWORD bit = DWORD{1} << index;
         if (!(wanted & bit)) continue;
-        ++diagnostics.immReads;
         const DWORD bytes = ImmGetCandidateListW(imc.handle, index, nullptr, 0);
         if (bytes < sizeof(CANDIDATELIST) || bytes > MaxCandidateBytes) continue;
         std::vector<DWORD> buffer((bytes + sizeof(DWORD) - 1) / sizeof(DWORD));
@@ -777,7 +671,6 @@ DWORD handleImmCandidates(WPARAM notification, DWORD mask) {
         CandidatePage page;
         if (copied > bytes || !readImmPage(buffer.data(), copied, page)) continue;
         if (!s.token || s.attachment != attachment || !foreground()) return mask;
-        ++diagnostics.immPages;
         s.immCandidates = std::move(page);
         s.immListMask = bit;
         return mask & ~bit;
@@ -801,12 +694,12 @@ void immResult(LPARAM flags) {
 
 DWORD filterCandidateNotification(WPARAM notification, DWORD mask) {
     switch (notification) {
-    case IMN_OPENCANDIDATE: ++diagnostics.immOpen; break;
-    case IMN_CHANGECANDIDATE: ++diagnostics.immChange; break;
-    case IMN_CLOSECANDIDATE: ++diagnostics.immClose; break;
+    case IMN_OPENCANDIDATE:
+    case IMN_CHANGECANDIDATE:
+    case IMN_CLOSECANDIDATE:
+        break;
     default: return mask;
     }
-    diagnostics.immNotifyMask = mask;
     if (!s.token || !foreground()) return mask;
     try { return handleImmCandidates(notification, mask); }
     catch (...) { clearImmCandidates(); return mask; }
@@ -832,7 +725,6 @@ void handleQueuedIme(MSG& msg) {
         const auto original = static_cast<DWORD>(msg.lParam);
         const auto remaining = filterCandidateNotification(msg.wParam, original);
         if (remaining == original) return;
-        ++diagnostics.queuedCandidates;
         if (remaining) { msg.lParam = remaining; return; }
         break;
     }
@@ -851,10 +743,7 @@ void handleQueuedIme(MSG& msg) {
 }
 
 LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
-    if (w && message == WM_IME_SETCONTEXT) {
-        ++diagnostics.imeSetContext;
-        diagnostics.imeFlags = static_cast<DWORD>(l);
-    } else if (message == WM_IME_NOTIFY) {
+    if (message == WM_IME_NOTIFY) {
         const DWORD mask = filterCandidateNotification(w, static_cast<DWORD>(l));
         if (mask != static_cast<DWORD>(l))
             return mask ? DefWindowProcW(window, message, w, mask) : 0;
@@ -1076,30 +965,6 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
 
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
 
-PyObject* diagnosticsPython(PyObject*, PyObject*) {
-    ITfDocumentMgr* focused = nullptr;
-    const bool ownsFocus = s.document && s.manager->GetFocus(&focused) == S_OK && focused == s.document;
-    release(focused);
-    CLSID tip{};
-    const bool hasTip = s.keys && s.keys->GetForeground(&tip) == S_OK && !IsEqualGUID(tip, GUID_NULL);
-    DWORD flags = 0;
-    const bool flagsKnown = activeTsfFlags(flags);
-    const auto& d = diagnostics;
-    char report[640];
-    std::snprintf(report, sizeof report,
-                  "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u "
-                  "composition=%u caret=%u/%u draftDetach=%u tsfFlags=%d/0x%lx uiSamples=%u candidates=%u shown=%u "
-                  "overlay=%u/%u choices=%u/0x%lx imeContext=%u/0x%lx immCandidate=%u/%u/%u "
-                  "immRead=%u/%u mask=0x%lx owned=0x%lx queued=%u segmented=%d caretScreen=%ld,%ld,%ld,%ld",
-                  ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
-                  d.store.composition, d.store.textExtOk, d.store.textExt, d.draftDetach, flagsKnown, flags,
-                  d.uiSamples, d.candidates, d.shown, d.overlayRows, d.overlayClickable, d.choices,
-                  static_cast<DWORD>(d.choiceResult), d.imeSetContext, d.imeFlags,
-                  d.immOpen, d.immChange, d.immClose, d.immReads, d.immPages, d.immNotifyMask, s.immListMask,
-                  d.queuedCandidates, d.segmented, d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
-    return PyString_FromString(report);
-}
-
 PyObject* clearPython(PyObject*, PyObject*) {
     s.sample.token = 0;
     Py_RETURN_NONE;
@@ -1126,7 +991,6 @@ PyMethodDef methods[] = {
     {"ImeTick", tickPython, METH_VARARGS, nullptr},
     {"ImeCandidates", candidatesPython, METH_NOARGS, nullptr},
     {"ImeStatus", statusPython, METH_NOARGS, nullptr},
-    {"ImeDiagnostics", diagnosticsPython, METH_NOARGS, nullptr},
     {"ImeClear", clearPython, METH_NOARGS, nullptr},
     {"ImeSnapshot", snapshotPython, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
