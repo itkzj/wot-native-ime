@@ -286,12 +286,32 @@ std::wstring immPreedit(HIMC handle, const std::wstring& text) {
     return immText(handle, GCS_COMPSTR) == text ? immClausePreview(handle, text, GCS_COMPCLAUSE) : text;
 }
 
+std::wstring tsfReading(ITfUIElement* element, const std::wstring& text) {
+    if (!s.context || text.empty()) return {};
+    ITfReadingInformationUIElement* raw = nullptr;
+    if (element->QueryInterface(readingInformationId, reinterpret_cast<void**>(&raw)) != S_OK || !raw) return {};
+    Com<ITfReadingInformationUIElement> reading(raw);
+    ITfContext* owner = nullptr;
+    const bool ours = reading->GetContext(&owner) == S_OK && owner == s.context;
+    release(owner);
+    if (!ours) return {};
+    BSTR value = nullptr;
+    const auto result = reading->GetString(&value);
+    std::unique_ptr<wchar_t, decltype(&SysFreeString)> buffer(value, &SysFreeString);
+    const auto length = SysStringLen(value);
+    if (result != S_OK || length <= text.size() || length > TextStore::Capacity) return {};
+    std::wstring preview(value, length);
+    return readingMatches(text, preview) ? std::move(preview) : std::wstring{};
+}
+
 bool composing() { return s.store ? s.store->composing : s.immComposing; }
 
 void sampleCandidateUI() {
     CandidatePage next;
+    std::wstring preedit, reading;
     bool nativeVisible = false;
     if (s.store && s.store->composing) {
+        preedit = compositionText(s.context, *s.store);
         auto* ui = uiManager();
         IEnumTfUIElements* raw = nullptr;
         if (ui) ui->EnumUIElements(&raw);
@@ -303,6 +323,7 @@ void sampleCandidateUI() {
             ULONG fetched = 0;
             while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
                 Com<ITfUIElement> owned(element);
+                if (reading.empty()) reading = tsfReading(element, preedit);
                 auto list = ownedCandidate(element);
                 element = nullptr;
                 if (!list) continue;
@@ -337,8 +358,9 @@ void sampleCandidateUI() {
     }
     diagnostics.segmented = false;
     if (!nativeVisible) {
-        if (s.store) next.preedit = compositionText(s.context, *s.store);
-        if (s.immComposing || (s.immListMask && !next.preedit.empty())) {
+        diagnostics.segmented = !reading.empty();
+        next.preedit = reading.empty() ? std::move(preedit) : std::move(reading);
+        if (!diagnostics.segmented && (s.immComposing || (s.immListMask && !next.preedit.empty()))) {
             const ImmContext imc(s.window);
             if (imc.handle) {
                 if (!s.store) next.preedit = immText(imc.handle, GCS_COMPSTR);

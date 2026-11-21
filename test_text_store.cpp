@@ -59,6 +59,39 @@ struct Candidate final : ITfCandidateListUIElementBehavior {
     HRESULT STDMETHODCALLTYPE Abort() override { return E_NOTIMPL; }
 };
 
+struct Reading final : ITfReadingInformationUIElement {
+    ITfContext* context;
+    ULONG refs = 1;
+    explicit Reading(ITfContext* owner) : context(owner) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        *out = nullptr;
+        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElement) && iid != readingInformationId)
+            return E_NOINTERFACE;
+        *out = static_cast<ITfReadingInformationUIElement*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs; }
+    HRESULT STDMETHODCALLTYPE GetDescription(BSTR*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetGUID(GUID* guid) override { *guid = readingInformationId; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Show(BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE IsShown(BOOL* shown) override { *shown = FALSE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetContext(ITfContext** owner) override {
+        context->AddRef();
+        *owner = context;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetString(BSTR* value) override {
+        *value = SysAllocString(L"ni'hao");
+        return *value ? S_OK : E_OUTOFMEMORY;
+    }
+    HRESULT STDMETHODCALLTYPE GetMaxReadingStringLength(UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetErrorIndex(UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE IsVerticalOrderPreferred(BOOL*) override { return E_NOTIMPL; }
+};
+
 int main() {
     // CANDIDATELIST with three UTF-16 entries and a second page starting at index 1.
     DWORD imm[] = {48, 0, 3, 2, 1, 2, 36, 40, 44, 'a', 0x4f60, 0x597d};
@@ -149,6 +182,15 @@ int main() {
     if (FAILED(outcome)) std::fprintf(stderr, "TSF edit session result: 0x%08lx\n", static_cast<unsigned long>(outcome));
     assert(SUCCEEDED(outcome));
     assert(testPreedit(manager, context, store) == L"nihao");
+    ITfUIElementMgr* ui = nullptr;
+    assert(manager->QueryInterface(__uuidof(ITfUIElementMgr), reinterpret_cast<void**>(&ui)) == S_OK);
+    Reading reading(context);
+    BOOL show = FALSE;
+    DWORD readingId = 0;
+    assert(ui->BeginUIElement(&reading, &show, &readingId) == S_OK);
+    assert(testPreedit(manager, context, store) == L"ni'hao");
+    assert(ui->EndUIElement(readingId) == S_OK && reading.refs == 1);
+    ui->Release();
     assert(SUCCEEDED(context->RequestEditSession(id, &insert, TF_ES_SYNC | TF_ES_READWRITE, &outcome)));
     assert(SUCCEEDED(outcome));
     assert(testPreedit(manager, context, store).empty());

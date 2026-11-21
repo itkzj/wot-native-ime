@@ -25,3 +25,15 @@ struct ITfCandidateListUIElementBehavior : ITfCandidateListUIElement {
 };
 #endif
 inline constexpr IID candidateBehaviorId{0x85fad185, 0x58ce, 0x497a, {0x94, 0x60, 0x35, 0x53, 0x66, 0xb6, 0x4b, 0x9a}};
+
+#ifndef __ITfReadingInformationUIElement_INTERFACE_DEFINED__
+struct ITfReadingInformationUIElement : ITfUIElement {
+    virtual HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetContext(ITfContext**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetString(BSTR*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetMaxReadingStringLength(UINT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetErrorIndex(UINT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE IsVerticalOrderPreferred(BOOL*) = 0;
+};
+#endif
+inline constexpr IID readingInformationId{0xea1ea139, 0x19df, 0x11d7, {0xa6, 0xd2, 0x00, 0x06, 0x5b, 0x84, 0x43, 0x5c}};

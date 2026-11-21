@@ -49,6 +49,11 @@ package {
         private var pressedRow:int = -1;
         private var pendingChoice:Array;
         private var stockImeWindows:Array = [];
+        private var stockFocusStage:Stage;
+        private var stockCandidate:Sprite;
+        private var stockCandidateAlpha:Number;
+        private var stockCandidateMouse:Boolean;
+        private var stockCandidateChildren:Boolean;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -69,6 +74,7 @@ package {
         }
 
         public function as_stop():void {
+            as_watchFocus(false);
             domain = null;
             app = null;
             getFocus = null;
@@ -78,29 +84,53 @@ package {
         private function bridgeStageChanged(event:Event):void {
             if (event.target !== this) return;
             bridgeDetached = event.type == Event.REMOVED_FROM_STAGE;
-            if (bridgeDetached) setField(null);
+            if (bridgeDetached) {
+                as_watchFocus(false);
+                setField(null);
+            }
         }
 
-        public function as_owned(owned:Boolean):void {
-            if (!owned || !field) {
+        public function as_watchFocus(enabled:Boolean):void {
+            var movie:Stage = enabled ? inputStage() : null;
+            if (movie !== stockFocusStage) {
+                if (stockFocusStage) stockFocusStage.removeEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true);
+                stockFocusStage = movie;
+                if (movie) movie.addEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true, 100, true);
+            }
+            if (movie) focused();
+            showStockStatus(!movie || !field);
+        }
+
+        private function stockFocusIn(event:FocusEvent):void {
+            if (domain && stockFocusStage) {
+                showStockStatus(!eligible(event.target as TextField, stockFocusStage));
+            }
+        }
+
+        private function showStockStatus(show:Boolean):void {
+            if (show) {
                 for each (var state:Array in stockImeWindows) state[0].visible = state[1];
                 stockImeWindows.length = 0;
                 return;
             }
-            if (stockImeWindows.length || !app || !app.utils || !app.utils.IME) return;
+            if (!app || !app.utils || !app.utils.IME) return;
             var container:DisplayObjectContainer = app.utils.IME.getContainer() as DisplayObjectContainer;
             if (!container) return;
             for each (var name:String in ["LangBar", "StatusWindow"]) {
                 var child:DisplayObject = container.getChildByName(name);
                 if (!child) continue;
-                stockImeWindows.push([child, child.visible]);
+                var known:Boolean = false;
+                for each (var hidden:Array in stockImeWindows) {
+                    if (hidden[0] === child) { known = true; break; }
+                }
+                if (!known) stockImeWindows.push([child, child.visible]);
                 child.visible = false;
             }
         }
 
         private function setField(next:TextField):void {
             if (next === field) return;
-            as_owned(false);
+            showStockStatus(!next || !stockFocusStage);
             hideCandidates();
             if (field) {
                 field.removeEventListener(FocusEvent.FOCUS_OUT, lostField);
@@ -142,8 +172,12 @@ package {
             return false;
         }
 
+        private function inputStage():Stage {
+            return battle ? stage : app && app.instance ? app.stage as Stage : stage;
+        }
+
         private function focused():Stage {
-            var movie:Stage = battle ? stage : app && app.instance ? app.stage as Stage : stage;
+            var movie:Stage = inputStage();
             var target:TextField = !bridgeDetached && movie && domain ?
                 (getFocus != null ? getFocus(0) : movie.focus) as TextField : null;
             setField(movie && domain && eligible(target, movie) ? target : null);
@@ -203,7 +237,10 @@ package {
                 hideCandidates();
                 return null;
             }
-            if (candidatePanel) positionCandidates(movie, screen, caret);
+            if (candidatePanel) {
+                positionCandidates(movie, screen, caret);
+                if (stockCandidate && stockCandidate.stage === movie) stockCandidate.alpha = 0;
+            }
             var first:int = field.selectionBeginIndex;
             var last:int = field.selectionEndIndex;
             return [generation, field.text, first, last, first != last && field.caretIndex == first,
@@ -245,6 +282,7 @@ package {
                 candidateStage = movie;
                 movie.addEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true, 100, true);
                 candidateLimit = -1;
+                if (labels.length) hideStockCandidate(movie);
             }
             if (!clickable) {
                 pendingChoice = null;
@@ -271,7 +309,41 @@ package {
             return choice;
         }
 
+        private function hideStockCandidate(movie:Stage):void {
+            // ponytail: candidate clips in this movie only, host-only clips need an exposed Scaleform control.
+            var remaining:Array = [movie];
+            for (var i:int = 0; i < remaining.length && i < 768; ++i) {
+                var parent:DisplayObjectContainer = remaining[i] as DisplayObjectContainer;
+                var node:Sprite = parent.getChildByName("candidateList") as Sprite;
+                var api:Object = node;
+                if (node && api["SetList"] is Function && api["ClearList"] is Function &&
+                    api["SelectDataItem"] is Function) {
+                    stockCandidate = node;
+                    stockCandidateAlpha = node.alpha;
+                    stockCandidateMouse = node.mouseEnabled;
+                    stockCandidateChildren = node.mouseChildren;
+                    node.alpha = 0;
+                    node.mouseEnabled = node.mouseChildren = false;
+                    return;
+                }
+                for (var childIndex:int = 0; childIndex < parent.numChildren && remaining.length < 768; ++childIndex) {
+                    var container:DisplayObjectContainer = parent.getChildAt(childIndex) as DisplayObjectContainer;
+                    if (container && container !== candidatePanel) remaining.push(container);
+                }
+            }
+        }
+
+        public function as_stockCandidateHidden():Boolean {
+            return stockCandidate != null && stockCandidate.stage === candidateStage;
+        }
+
         private function hideCandidates():void {
+            if (stockCandidate) {
+                stockCandidate.alpha = stockCandidateAlpha;
+                stockCandidate.mouseEnabled = stockCandidateMouse;
+                stockCandidate.mouseChildren = stockCandidateChildren;
+                stockCandidate = null;
+            }
             if (candidateStage) candidateStage.removeEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true);
             var panel:Sprite = candidatePanel;
             candidatePanel = null;
