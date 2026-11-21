@@ -13,6 +13,8 @@ struct Candidate final : ITfCandidateListUIElementBehavior {
     ITfDocumentMgr* document;
     ULONG refs = 1;
     UINT selection = 3, finalizations = 0;
+    TextStore* endDuringSelection = nullptr;
+    std::wstring pendingPinyin;
     bool shown = false;
     explicit Candidate(ITfDocumentMgr* owner) : document(owner) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
@@ -54,8 +56,12 @@ struct Candidate final : ITfCandidateListUIElementBehavior {
     }
     HRESULT STDMETHODCALLTYPE SetPageIndex(UINT*, UINT) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* page) override { *page = 1; return S_OK; }
-    HRESULT STDMETHODCALLTYPE SetSelection(UINT index) override { selection = index; return S_OK; }
-    HRESULT STDMETHODCALLTYPE Finalize() override { ++finalizations; return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetSelection(UINT index) override {
+        selection = index;
+        if (endDuringSelection) endDuringSelection->OnEndComposition(nullptr);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Finalize() override { ++finalizations; pendingPinyin.clear(); return S_OK; }
     HRESULT STDMETHODCALLTYPE Abort() override { return E_NOTIMPL; }
 };
 
@@ -164,6 +170,14 @@ int main() {
     assert(!candidate.shown && foreign.shown);
     assert(candidate.refs == 1 && foreign.refs == 1);
     assert(candidate.selection == 2 && candidate.finalizations == 1 && !foreign.finalizations);
+    // The TIP can end the store composition inside SetSelection, before its
+    // candidate behavior receives the explicit confirmation that consumes the reading.
+    candidate.selection = 3;
+    candidate.endDuringSelection = store;
+    candidate.pendingPinyin = L"ni";
+    assert(testCandidateUI(manager, document, store, &candidate, &foreign));
+    candidate.pendingPinyin += L"hao";
+    assert(candidate.pendingPinyin == L"hao" && candidate.finalizations == 2);
     other->Release();
 
     document->Pop(TF_POPF_ALL);

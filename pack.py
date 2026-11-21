@@ -5,7 +5,7 @@ from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 from pack_stock_filter import RESOURCE, stock_registration
 
-VERSION = '1.0'
+VERSION = '1.0.1'
 ROOT = 'mods/2.4.1.1/'
 
 
@@ -38,7 +38,7 @@ files = [wotmod('wot.native.ime', 'WoT Native IME', [
 if len(sys.argv) == 2:
     files.append(wotmod('wot.native.ime.stock-filter', 'WoT Native IME Stock Filter', [
         ('res/' + RESOURCE, stock_registration(sys.argv[1]))]))
-output = 'dist/WotNativeIme_V1.0%s.zip' % ('' if len(sys.argv) == 2 else '_Core')
+output = 'dist/WotNativeIme_V%s%s.zip' % (VERSION, '' if len(sys.argv) == 2 else '_Core')
 with ZipFile(output, 'w', ZIP_DEFLATED) as release:
     for path, data in files:
         release.writestr(path, data)

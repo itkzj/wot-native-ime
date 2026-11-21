@@ -308,7 +308,9 @@ bool chooseCandidate(unsigned serial, unsigned row) {
     if (!behavior) return false;
     const UINT index = page.first + row;
     if (behavior->SetSelection(index) != S_OK) return false;
-    if (s.store->composing && behavior->Finalize() != S_OK) return false;
+    // SetSelection can end the text-store composition synchronously. The selected
+    // candidate behavior still needs its own confirmation to consume the reading.
+    if (behavior->Finalize() != S_OK) return false;
     s.candidates = CandidatePage{};
     return true;
 }

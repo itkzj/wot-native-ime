@@ -1,11 +1,11 @@
-# 坦克世界原生输入法 V1.0
+# 坦克世界原生输入法 V1.0.1
 
 适用于《坦克世界》国服 2.4.1.1 x64。车库聊天、联系人搜索和战斗聊天使用原版输入框。Windows 当前输入法负责组字、选词和确认，游戏负责发送或搜索。候选和组字预览显示在光标旁，预览按输入法提供的文本显示。鼠标选词需要输入法提供 TSF 确认接口。
 
 ## 安装和回退
 
 1. 退出游戏，将旧版 `wot.native.ime_*.wotmod`、`wot.native.ime.stock-filter_*.wotmod` 和 `_wot_native_ime.pyd` 移出 `mods/2.4.1.1/`，一并保留作为备份。
-2. 将 [V1.0 完整安装包](dist/WotNativeIme_V1.0.zip)解压到游戏根目录。`mods/2.4.1.1/` 下应出现 `wot.native.ime_1.0.wotmod`、`_wot_native_ime.pyd` 和 `wot.native.ime.stock-filter_1.0.wotmod`。
+2. 将 [V1.0.1 完整安装包](dist/WotNativeIme_V1.0.1.zip)解压到游戏根目录。`mods/2.4.1.1/` 下应出现 `wot.native.ime_1.0.1.wotmod`、`_wot_native_ime.pyd` 和 `wot.native.ime.stock-filter_1.0.1.wotmod`。
 3. 在公共聊天输入一组拼音，确认光标旁只出现一个候选框。按数字选词后，文字应只上屏一次，候选框随即关闭。随后按 `Enter` 由游戏发送。在联系人搜索和战斗聊天也可按此方式检查。
 
 去重模组覆盖客户端 Scaleform 的 `gui/flash/ime.xml`，会影响其他使用该配置的游戏输入框。只回退去重功能时，退出游戏并移出去重模组。完整回退时移出以上三个文件，再放回同一版本的备份。
