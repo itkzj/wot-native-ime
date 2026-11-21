@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+mkdir -p build dist
+export FLEX_HOME="$(cygpath -aw ../tools/flex)"
+export PATH="$(cygpath -au ../tools/jre/jdk-21.0.13+9-jre/bin):$PATH"
+flex=../tools/flex/bin
+python=../tools/python27/python.exe
+cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
+"$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -shared NativeIme.cpp \
+    -o build/WotNativeIme.dll -lole32 -luuid -lcomctl32 -limm32
+"$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static test_text_store.cpp \
+    -o build/test_text_store.exe -lole32 -luuid
+./build/test_text_store.exe
+"$flex/compc" -source-path=extern -include-classes=net.wg.infrastructure.base.AbstractView \
+    -target-player=32.0 -output=build/extern.swc
+"$flex/mxmlc" -compiler.external-library-path+=build/extern.swc -target-player=32.0 \
+    -swf-version=17 -output=build/NativeImeBridge.swf NativeImeBridge.as
+"$python" pack.py
