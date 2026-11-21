@@ -1,12 +1,12 @@
-# 坦克世界原生输入法 V1
+# 坦克世界原生输入法 V2
 
 目标客户端为国服 2.4.1.1 x64。实现依据是会话 `session-982d148b-90b2-42f9-b3f3-06947c2d339e` 的[可行性研究](../坦克世界原生输入法接入可行性.md#L33-L39)。
 
-V1 在游戏窗口线程接入 Windows 文本服务（TSF 或 IMM），使用当前输入法显示候选。模组从原版 Scaleform 输入框读取光标位置和选区，确认后向同一个输入框应用结果。发送与搜索继续由游戏处理。接入范围包括车库聊天和联系人搜索，以及战斗聊天。
+V2 通过客户端的 Python 2.7 原生扩展加载 Windows 文本服务（TSF 或 IMM），解决 V1 缺少 `_ctypes` 导致模组启动失败的问题。模组从原版 Scaleform 输入框读取光标位置和选区，确认后向同一个输入框应用结果。发送与搜索继续由游戏处理。接入范围包括车库聊天和联系人搜索，以及战斗聊天。
 
 ## 安装与实机验收
 
-退出游戏，暂时移出旧版输入法修复的 `.wotmod` 和此前的输入法探针，再把 [V1 安装包](dist/WotNativeIme_V1.zip) 解压到游戏根目录。包内两项都在 `mods/2.4.1.1/` 下。回退时退出游戏并移出本包的 `wot.native.ime_1.0.0.wotmod` 和 `WotNativeIme.dll`。
+退出游戏后，把 V1 的 `wot.native.ime_1.0.0.wotmod` 和 `WotNativeIme.dll` 移出 `mods/2.4.1.1/`。首次测试请暂时移出其他输入法模组和探针。把安装包解压到游戏根目录，`mods/2.4.1.1/` 下应出现 `wot.native.ime_1.0.1.wotmod` 和 `_wot_native_ime.pyd`。回退时退出游戏并移出这两项。[V2 安装包](dist/WotNativeIme_V2.zip)
 
 使用默认配置的微软拼音和当前使用的搜狗拼音，各验证一遍。先测位于屏幕原位置的车库公共聊天框，再测联系人搜索和战斗聊天。
 
@@ -19,12 +19,12 @@ V1 在游戏窗口线程接入 Windows 文本服务（TSF 或 IMM），使用当
 | 选中文字后组字，再按 `Esc` 或切换窗口 | 候选消失，原文保留 |
 | 确认候选后单独按一次 `Enter` | 由游戏按原有规则发送聊天或搜索 |
 
-排查时，在游戏的 `python.log` 中找 `[WotNativeIme]`。`Mod loaded` 表示模组初始化，聚焦受支持字段后应出现 `TSF attached` 或 `IMM attached`。实机候选位置和按键行为以游戏画面为准。
+排查时，在游戏的 `game.log` 中找 `[WotNativeIme]`。`V2 mod loaded` 表示模组初始化，聚焦支持的输入框后应出现 `TSF attached` 或 `IMM attached`。候选位置和按键行为以游戏画面为准。
 
 ## 构建与验证
 
 在 Windows 的 MSYS Bash 中运行 `bash build.sh`。使用工作区既有的 Flex、Temurin 21、Python 2.7 以及 x64 MinGW，可通过 `CXX` 指定编译器。
 
-构建会在真实 Windows TSF COM 编辑会话中检查选区替换及组字开始、结束回调，并校验最终安装包结构。真实输入法的候选窗口、点击选词和游戏内按键冲突需要实机验收。
+构建会检查 `_ctypes` 不可用时仍能加载原生扩展，在 Windows TSF COM 编辑会话中检查选区替换和组字回调，并校验最终安装包结构。候选窗和按键行为需要在游戏里测试。
 
 源码采用 [GPL-3.0](LICENSE)。

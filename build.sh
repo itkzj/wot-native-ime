@@ -8,7 +8,9 @@ flex=../tools/flex/bin
 python=../tools/python27/python.exe
 cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
 "$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -shared NativeIme.cpp \
-    -o build/WotNativeIme.dll -lole32 -luuid -lcomctl32 -limm32
+    -DMS_WIN64 -isystem ../tools/python27/include -L../tools/python27/libs \
+    -o build/_wot_native_ime.pyd -lpython27 -lole32 -luuid -lcomctl32 -limm32
+"$python" -S test_native_module.py
 "$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static test_text_store.cpp \
     -o build/test_text_store.exe -lole32 -luuid
 ./build/test_text_store.exe

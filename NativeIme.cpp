@@ -1,4 +1,6 @@
 #define NOMINMAX
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
 #include "TextStore.h"
 #include <array>
 #include <commctrl.h>
@@ -363,9 +365,8 @@ void stop() {
     s = State{};
     s.busy = busy;
 }
-}
 
-extern "C" __declspec(dllexport) int WINAPI ImeStart(Refresh refresh, Commit commitCallback) {
+int ImeStart(Refresh refresh, Commit commitCallback) {
     if (s.busy) return 0;
     HWND window = gameWindow();
     if (s.hook && s.window && (!window || window == s.window)) return 1;
@@ -401,26 +402,26 @@ extern "C" __declspec(dllexport) int WINAPI ImeStart(Refresh refresh, Commit com
     return 1;
 }
 
-extern "C" __declspec(dllexport) void WINAPI ImeStop() {
+void WINAPI ImeStop() {
     if (s.busy || !s.thread) return;
     Busy busy;
     stop();
 }
 
-extern "C" __declspec(dllexport) void WINAPI ImeTick() {
+void WINAPI ImeTick() {
     if (s.busy || !s.hook) return;
     Busy busy;
     try { flushTsf(); sync(); }
     catch (...) { detach(); }
 }
 
-extern "C" __declspec(dllexport) int WINAPI ImeStatus() {
+int WINAPI ImeStatus() {
     if (!s.hook || !s.window) return 0;
     if (s.token) return s.imm ? 3 : 2;
     return s.attachFailed && s.sample.token ? 4 : 1;
 }
 
-extern "C" __declspec(dllexport) void WINAPI ImeSnapshot(unsigned token, const wchar_t* text,
+void WINAPI ImeSnapshot(unsigned token, const wchar_t* text,
                                                        int first, int last, int leading, const int* rects) {
     s.sample.token = 0;
     if (!token || !text || !rects || first < 0 || last < first) return;
@@ -437,3 +438,110 @@ extern "C" __declspec(dllexport) void WINAPI ImeSnapshot(unsigned token, const w
         s.sample.token = token;
     } catch (...) { }
 }
+
+thread_local PyObject* pyRefresh = nullptr;
+thread_local PyObject* pyCommit = nullptr;
+
+// Window callbacks can run outside a Python call, or during a nested Python call.
+struct PythonCallback {
+    PyGILState_STATE gil = PyGILState_Ensure();
+    PyObject *type, *value, *trace;
+    PythonCallback() { PyErr_Fetch(&type, &value, &trace); }
+    ~PythonCallback() {
+        PyErr_Restore(type, value, trace);
+        PyGILState_Release(gil);
+    }
+};
+
+void WINAPI refreshPython() {
+    if (!pyRefresh || !Py_IsInitialized()) return;
+    PythonCallback lock;
+    PyObject* callback = pyRefresh;
+    Py_INCREF(callback);
+    PyObject* result = PyObject_CallObject(callback, nullptr);
+    if (!result) PyErr_WriteUnraisable(callback);
+    Py_XDECREF(result);
+    Py_DECREF(callback);
+}
+
+int WINAPI commitPython(unsigned token, const wchar_t* before, int first, int last, int leading,
+                        const wchar_t* after, int newFirst, int newLast, int newLeading) {
+    if (!pyCommit || !Py_IsInitialized()) return 0;
+    PythonCallback lock;
+    PyObject* callback = pyCommit;
+    Py_INCREF(callback);
+    char format[] = "(Iuiiiuiii)";
+    PyObject* result = PyObject_CallFunction(callback, format, token, before, first, last,
+                                             leading, after, newFirst, newLast, newLeading);
+    int accepted = result ? PyObject_IsTrue(result) : -1;
+    if (accepted < 0) PyErr_WriteUnraisable(callback);
+    Py_XDECREF(result);
+    Py_DECREF(callback);
+    return accepted > 0;
+}
+
+PyObject* startPython(PyObject*, PyObject* args) {
+    PyObject *refresh, *commit;
+    if (!PyArg_ParseTuple(args, "OO:ImeStart", &refresh, &commit)) return nullptr;
+    if (!PyCallable_Check(refresh) || !PyCallable_Check(commit)) {
+        PyErr_SetString(PyExc_TypeError, "ImeStart requires two callbacks");
+        return nullptr;
+    }
+    const int attached = ImeStart(refreshPython, commitPython);
+    if (attached && (refresh != pyRefresh || commit != pyCommit)) {
+        Py_INCREF(refresh);
+        Py_INCREF(commit);
+        Py_XDECREF(pyRefresh);
+        Py_XDECREF(pyCommit);
+        pyRefresh = refresh;
+        pyCommit = commit;
+    }
+    return PyBool_FromLong(attached);
+}
+
+PyObject* stopPython(PyObject*, PyObject*) {
+    ImeStop();
+    Py_CLEAR(pyRefresh);
+    Py_CLEAR(pyCommit);
+    Py_RETURN_NONE;
+}
+
+PyObject* tickPython(PyObject*, PyObject*) {
+    ImeTick();
+    Py_RETURN_NONE;
+}
+
+PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
+
+PyObject* clearPython(PyObject*, PyObject*) {
+    s.sample.token = 0;
+    Py_RETURN_NONE;
+}
+
+PyObject* snapshotPython(PyObject*, PyObject* args) {
+    unsigned token;
+    const Py_UNICODE* text;
+    Py_ssize_t length;
+    int first, last, leading, r[8];
+    if (!PyArg_ParseTuple(args, "Iu#iii(iiiiiiii):ImeSnapshot", &token, &text, &length, &first, &last,
+                          &leading, &r[0], &r[1], &r[2], &r[3], &r[4], &r[5], &r[6], &r[7])) return nullptr;
+    if (length > TextStore::Capacity || std::wmemchr(text, L'\0', length)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid UTF-16 snapshot");
+        return nullptr;
+    }
+    ImeSnapshot(token, text, first, last, leading, r);
+    Py_RETURN_NONE;
+}
+
+PyMethodDef methods[] = {
+    {"ImeStart", startPython, METH_VARARGS, nullptr},
+    {"ImeStop", stopPython, METH_NOARGS, nullptr},
+    {"ImeTick", tickPython, METH_NOARGS, nullptr},
+    {"ImeStatus", statusPython, METH_NOARGS, nullptr},
+    {"ImeClear", clearPython, METH_NOARGS, nullptr},
+    {"ImeSnapshot", snapshotPython, METH_VARARGS, nullptr},
+    {nullptr, nullptr, 0, nullptr},
+};
+}
+
+PyMODINIT_FUNC init_wot_native_ime() { Py_InitModule("_wot_native_ime", methods); }

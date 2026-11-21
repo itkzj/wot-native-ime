@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Attach Windows IME to focused stock Scaleform chat and search fields."""
-import ctypes as C
+import imp
 import os
+import sys
 import traceback
 
 import BigWorld
@@ -18,11 +19,7 @@ from skeletons.gui.impl import IGuiLoader
 
 LOBBY = 'WotNativeImeLobby'
 BATTLE = 'WotNativeImeBattle'
-LIBRARY = os.path.join('mods', '2.4.1.1', 'WotNativeIme.dll')
-Refresh = C.WINFUNCTYPE(None)
-Commit = C.WINFUNCTYPE(C.c_int, C.c_uint, C.c_wchar_p, C.c_int, C.c_int, C.c_int,
-                       C.c_wchar_p, C.c_int, C.c_int, C.c_int)
-Rectangles = C.c_int * 8
+LIBRARY = os.path.join('mods', '2.4.1.1', '_wot_native_ime.pyd')
 _lobby = _battle = _battle_owner = None
 _library = None
 _tick_id = None
@@ -66,7 +63,7 @@ def _refresh():
             generation = int(snapshot[0])
             text = _text(snapshot[1])
             first, last = map(int, snapshot[2:4])
-            rects = Rectangles(*map(int, snapshot[5:]))
+            rects = tuple(map(int, snapshot[5:]))
             if generation > 0 and 0 <= first <= last <= len(text):
                 if _binding != (view, generation):
                     _token = _token % 4294967295 + 1
@@ -76,7 +73,7 @@ def _refresh():
     except Exception:
         _error('Could not sample the original field')
     _binding = None
-    _library.ImeSnapshot(0, None, 0, 0, 0, None)
+    _library.ImeClear()
 
 
 def _commit(token, before, first, last, leading, after, new_first, new_last, new_leading):
@@ -91,33 +88,13 @@ def _commit(token, before, first, last, leading, after, new_first, new_last, new
         return 0
 
 
-# Both callbacks must outlive the native subclass and hook.
-_refresh_callback = Refresh(_refresh)
-_commit_callback = Commit(_commit)
-
-
 def _load_library():
-    filename = C.create_unicode_buffer(32768)
-    get_filename = C.windll.kernel32.GetModuleFileNameW
-    get_filename.argtypes = [C.c_void_p, C.POINTER(C.c_wchar), C.c_uint]
-    get_filename.restype = C.c_uint
-    if not 0 < get_filename(None, filename, len(filename)) < len(filename):
-        raise IOError('Could not locate the game executable')
-    executable_dir = os.path.dirname(filename.value)
-    for root in (executable_dir, os.path.dirname(executable_dir)):
+    executable_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else os.getcwd()
+    for root in (executable_dir, os.path.dirname(executable_dir), os.getcwd()):
         path = os.path.join(root, LIBRARY)
         if os.path.isfile(path):
-            library = C.WinDLL(path)
-            library.ImeStart.argtypes = [Refresh, Commit]
-            library.ImeStart.restype = C.c_int
-            library.ImeStatus.argtypes = []
-            library.ImeStatus.restype = C.c_int
-            library.ImeSnapshot.argtypes = [C.c_uint, C.c_wchar_p, C.c_int, C.c_int, C.c_int, C.POINTER(C.c_int)]
-            for fn in (library.ImeTick, library.ImeStop, library.ImeSnapshot):
-                fn.restype = None
-            library.ImeTick.argtypes = library.ImeStop.argtypes = []
-            return library
-    raise IOError('WotNativeIme.dll is missing from mods/2.4.1.1')
+            return imp.load_dynamic('_wot_native_ime', path)
+    raise IOError('_wot_native_ime.pyd is missing from mods/2.4.1.1')
 
 
 def _tick():
@@ -128,7 +105,7 @@ def _tick():
             _library.ImeStop()
         return
     try:
-        attached = _library.ImeStart(_refresh_callback, _commit_callback)
+        attached = _library.ImeStart(_refresh, _commit)
         if attached:
             _library.ImeTick()
         status = _library.ImeStatus()
@@ -237,7 +214,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] Mod loaded')
+        print('[WotNativeIme] V2 mod loaded')
     except Exception:
         _error('Could not register native IME')
 
