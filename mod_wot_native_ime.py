@@ -168,7 +168,7 @@ def _tick():
             if _diag_ticks == 0:
                 report = _library.ImeDiagnostics()
                 if status == 2:
-                    report += ' stockFieldSuppressed=%d' % bool(view.flashObject.as_stockFieldSuppressed())
+                    report += ' stockFieldSuppression=%d' % int(view.flashObject.as_stockFieldSuppression())
                 if report != _diag_last:
                     print('[WotNativeIme] TSF diagnostic ' + report)
                     _diag_last = report
@@ -282,7 +282,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V14 mod loaded')
+        print('[WotNativeIme] V15 mod loaded')
     except Exception:
         _error('Could not register native IME')
 
