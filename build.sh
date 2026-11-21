@@ -18,4 +18,4 @@ cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
     -target-player=32.0 -output=build/extern.swc
 "$flex/mxmlc" -compiler.external-library-path+=build/extern.swc -target-player=32.0 \
     -swf-version=17 -output=build/NativeImeBridge.swf NativeImeBridge.as
-"$python" pack.py
+"$python" -B pack.py "$@"

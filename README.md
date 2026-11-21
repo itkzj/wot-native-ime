@@ -1,4 +1,4 @@
-# 坦克世界原生输入法 V16 测试版
+# 坦克世界原生输入法 V17 测试版
 
 目标客户端为国服 2.4.1.1 x64。实现依据是会话 `session-982d148b-90b2-42f9-b3f3-06947c2d339e` 的[可行性研究](../坦克世界原生输入法接入可行性.md#L33-L39)。
 
@@ -6,9 +6,11 @@ V2 通过客户端的 Python 2.7 原生扩展加载 Windows 文本服务（TSF �
 
 ## 安装与实机验收
 
-退出游戏后，把上一版的 `.wotmod` 和原生模块移出 `mods/2.4.1.1/`。首次测试请暂时移出其他输入法模组和探针。把安装包解压到游戏根目录，`mods/2.4.1.1/` 下应出现 `wot.native.ime_1.0.15.wotmod` 和 `_wot_native_ime.pyd`。回退时退出游戏并移出这两项。[V16 测试包](dist/WotNativeIme_V16.zip)
+退出游戏后，移出旧版的主模组、原生模块和去重模组，再把 [V17 全登记测试包](dist/WotNativeIme_V17.zip)解压到游戏根目录。`mods/2.4.1.1/` 下应有 `wot.native.ime_1.0.16.wotmod`、`_wot_native_ime.pyd` 和 `wot.native.ime.stock-filter_1.0.1.wotmod`。
 
 使用默认配置的微软拼音和当前使用的搜狗拼音，各验证一遍。先测位于屏幕原位置的车库公共聊天框，再测联系人搜索和战斗聊天。
+
+V16 主包与 V16 去重附加包已在国服 2.4.1.1 实测。搜狗、微软、QQ 和微信拼音在公共聊天中只显示一套候选，数字选词只上屏一次，随后收框。联系人搜索和战斗聊天也通过了本轮实测。搜狗的预览目前没有音节分隔符。鼠标选词仅适用于提供确认接口的 TSF 候选，下表其余边界操作仍需逐项实测。
 
 | 操作 | 画面判据 |
 | --- | --- |
@@ -21,17 +23,26 @@ V2 通过客户端的 Python 2.7 原生扩展加载 Windows 文本服务（TSF �
 
 可读的 TSF 和 IMM 候选共用光标旁面板，组字结束时清理候选。支持的输入框获得焦点时，模组会隐藏游戏原有输入法状态栏。拼音预览保留输入法提供的分隔符，也读取与当前组字匹配的 TSF 读音或 IMM 分段数据。空格和数字选词由当前输入法处理，提供确认接口的 TSF 候选也支持鼠标选择。仅提供私有候选窗口的输入法仍使用其原候选界面。
 
-### 搜狗与 QQ 重复候选实验
+### Scaleform 输入法登记范围
 
-安装 V16 后，可额外解压[注册表实验包](dist/WotNativeIme_V16_StockFilter.zip)到游戏根目录。它将客户端配置中的搜狗拼音和 QQ 拼音标为 `GFxIME_NotSupported`，用于验证 Scaleform 是否停止绘制左上角的重复候选。如果客户端加载了这份配置，它会在客户端内全局生效，未接入模组的输入框也可能受影响。验证时先在公共聊天用数字选词，再检查联系人搜索和战斗聊天。微软拼音和微信输入法用于回归对照。
+国服 2.4.1.1 的 `gui/flash/ime.xml` 有 115 条登记，含不同版本和本地化别名。
 
-回退实验时，退出游戏并移出 `mods/2.4.1.1/wot.native.ime.stock-filter_1.0.0.wotmod`。V16 主包可以继续使用。实验包从本机已安装客户端的 `res/packages/gui-part3.pkg` 生成。在本仓库运行 `../tools/python27/python.exe pack_stock_filter.py PATH_TO_GUI_PART3_PKG` 可重建。
+| 语言 | 登记 | 关闭原版接管 | 登记中的输入法系列 |
+| --- | ---: | ---: | --- |
+| 简体中文 | 56 | 54 | 微软拼音、微软五笔、搜狗拼音和五笔、QQ 拼音和五笔、谷歌拼音、百度拼音、必应、JJ 拼音、全拼、双拼、郑码、智能 ABC、万能五笔、极点五笔、ArrayCL、新仓颉、内码 |
+| 繁体中文 | 35 | 31 | 注音、新注音、仓颉、新仓颉、速成、新速成、行列、大易、英数、Big5、Unicode |
+| 日文 | 13 | 13 | 微软日文 IME（含 2002、2003、2007、2010）、Google 日本语输入、ATOK 2008、2009、2013 |
+| 韩文 | 11 | 11 | 微软韩文 IME（含 2000、2002、2003、2007、2010）和微软韩文输入器 |
 
-在游戏的 `game.log` 中搜索 `[WotNativeIme]`。`V16 mod loaded` 表示模组初始化，聚焦支持的输入框后应出现 `TSF attached` 或 `IMM attached`。`overlay` 记录候选行数和鼠标选择接口状态。`immRead` 记录 IMM 列表读取次数和成功次数，`owned` 记录当前接管的列表。每次启动最多 40 条诊断，仅记录状态和计数。输入拼音后停两秒再确认，以便采集候选状态。
+V17 将 109 条原版接管登记改为 `GFxIME_NotSupported`，保留两条普通美式键盘登记及四条原有 `GFxIME_NotSupported` 登记。Windows 的 TSF/IMM 通道继续负责组字、候选和确认。V16 已实测微软、搜狗、QQ 和微信拼音，V17 的其他输入法仍需实机验证。全登记去重在客户端范围生效，模组尚未接入的输入框可能受影响。
+
+回退去重配置时，退出游戏并移出 `mods/2.4.1.1/wot.native.ime.stock-filter_1.0.1.wotmod`，主模组可继续使用。要恢复已实测的 V16 组合，移出 V17 的三项文件，再装回 [V16 主包](dist/WotNativeIme_V16.zip)和 [V16 去重附加包](dist/WotNativeIme_V16_StockFilter.zip)。
+
+在游戏的 `game.log` 中搜索 `[WotNativeIme]`。`V17 mod loaded` 表示模组初始化，聚焦支持的输入框后应出现 `TSF attached` 或 `IMM attached`。`overlay` 记录候选行数和鼠标选择接口状态。`immRead` 记录 IMM 列表读取次数和成功次数，`owned` 记录当前接管的列表。每次启动最多 40 条诊断，仅记录状态和计数。输入拼音后停两秒再确认，以便采集候选状态。
 
 ## 构建与验证
 
-在 Windows 的 MSYS Bash 中运行 `bash build.sh`。使用工作区既有的 Flex、Temurin 21、Python 2.7 以及 x64 MinGW，可通过 `CXX` 指定编译器。
+在 Windows 的 MSYS Bash 中运行 `bash build.sh PATH_TO_GUI_PART3_PKG`，将路径指向本机国服客户端的 `res/packages/gui-part3.pkg`。省略路径仅构建主模组。使用工作区既有的 Flex、Temurin 21、Python 2.7 和 x64 MinGW，可通过 `CXX` 指定编译器。
 
 构建会检查 `_ctypes` 不可用时仍能加载原生扩展，在 Windows TSF COM 编辑会话中检查选区替换和组字回调，并校验最终安装包结构。候选窗和按键行为需要在游戏里测试。
 

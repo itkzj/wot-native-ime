@@ -5,59 +5,80 @@ from xml.etree import ElementTree
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 RESOURCE = 'gui/flash/ime.xml'
-MOD = 'mods/2.4.1.1/wot.native.ime.stock-filter_1.0.0.wotmod'
-OUTPUT = 'dist/WotNativeIme_V16_StockFilter.zip'
-TAGS = {'GFxIME_SogouPinyin', 'GFxIME_Ch_Simp_QQPinyin'}
-STOCK_ENTRY = re.compile(r'(<imeName>[^<]*</imeName>\s*<displayName>)([^<]*)(</displayName>\s*<Tag>)([^<]*)(</Tag>)')
+MOD_NAME = 'wot.native.ime.stock-filter_1.0.1.wotmod'
+OUTPUT = 'dist/WotNativeIme_V17_StockFilter.zip'
+UNSUPPORTED = 'GFxIME_NotSupported'
+KEYBOARDS = {'GFxIME_Ch_Simp', 'GFxIME_Ch_Trad'}
+# WoT CN 2.4.1.1 registration counts, including localized aliases.
+EXPECTED = {'ChineseSimplified': (56, 54), 'ChineseTraditional': (35, 31),
+            'Japanese': (13, 13), 'Korean': (11, 11)}
+TAG = re.compile(r'(<Tag>)(GFxIME_\w+)(</Tag>)')
 
 
 def patch_registration(original):
     root = ElementTree.fromstring(original)
-    simplified = root.find('language/ChineseSimplified')
-    if root.tag != 'data' or simplified is None:
+    languages = root.find('language')
+    if root.tag != 'data' or languages is None or sorted(child.tag for child in languages) != sorted(EXPECTED):
         raise ValueError('Unexpected Scaleform registration format')
-    opening, closing = '<ChineseSimplified>', '</ChineseSimplified>'
-    start = original.index(opening) + len(opening)
-    end = original.index(closing, start)
-    seen = set()
+    preserved_keyboards = []
+    patched_count = 0
+    for language in languages:
+        tags = language.findall('Tag')
+        names = language.findall('imeName')
+        if len(tags) != len(names) or any(not tag.text or not tag.text.startswith('GFxIME_') for tag in tags):
+            raise ValueError('Unexpected Scaleform entries for ' + language.tag)
+        changed = 0
+        for tag in tags:
+            if tag.text in KEYBOARDS:
+                preserved_keyboards.append(tag.text)
+            elif tag.text != UNSUPPORTED:
+                tag.text = UNSUPPORTED
+                changed += 1
+        if (len(tags), changed) != EXPECTED[language.tag]:
+            raise ValueError('Unexpected Scaleform registration counts for ' + language.tag)
+        patched_count += changed
+    if sorted(preserved_keyboards) != sorted(KEYBOARDS):
+        raise ValueError('Expected both stock US keyboard registrations')
 
-    def replace(entry):
-        prefix, name, middle, tag, suffix = entry.groups()
-        if tag not in TAGS or name == 'Sougou Wubi':
-            return entry.group(0)
-        seen.add(tag)
-        return prefix + name + middle + 'GFxIME_NotSupported' + suffix
+    def replace(match):
+        opening, tag, closing = match.groups()
+        if tag in KEYBOARDS or tag == UNSUPPORTED:
+            return match.group(0)
+        return opening + UNSUPPORTED + closing
 
-    patched = original[:start] + STOCK_ENTRY.sub(replace, original[start:end]) + original[end:]
-    if seen != TAGS:
-        raise ValueError('Expected both stock Sogou and QQ Pinyin registrations')
-    ElementTree.fromstring(patched)
-    return patched
+    # Preserve stock encoding, whitespace and every field other than renderer tags.
+    patched = TAG.sub(replace, original)
+    if (len(TAG.findall(original)) != sum(total for total, _ in EXPECTED.values()) or
+            ElementTree.tostring(ElementTree.fromstring(patched)) != ElementTree.tostring(root)):
+        raise ValueError('Scaleform registration rewrite does not match parsed entries')
+    return patched, patched_count
 
 
-def main(archive):
+def stock_filter(archive):
     with ZipFile(archive) as stock:
         if stock.getinfo(RESOURCE).file_size > 64 * 1024:
             raise ValueError('Unexpected Scaleform registration size')
-        patched = patch_registration(stock.read(RESOURCE))
+        patched, count = patch_registration(stock.read(RESOURCE))
     metadata = ('<?xml version="1.0" encoding="utf-8"?>\n'
-                '<root><id>wot.native.ime.stock-filter</id><version>1.0.0</version>\n'
-                '<name>WoT Native IME Stock Filter Experiment</name></root>\n')
+                '<root><id>wot.native.ime.stock-filter</id><version>1.0.1</version>\n'
+                '<name>WoT Native IME Stock Filter</name></root>\n')
     payload = StringIO()
     with ZipFile(payload, 'w', ZIP_STORED) as mod:
         mod.writestr('meta.xml', metadata)
         mod.writestr('res/' + RESOURCE, patched)
-    with ZipFile(OUTPUT, 'w', ZIP_DEFLATED) as release:
-        release.writestr(MOD, payload.getvalue())
-    with ZipFile(OUTPUT) as release:
-        assert release.testzip() is None and release.namelist() == [MOD]
-        with ZipFile(StringIO(release.read(MOD))) as mod:
-            assert mod.testzip() is None and mod.namelist() == ['meta.xml', 'res/' + RESOURCE]
-            assert mod.read('res/' + RESOURCE) == patched
-    print(OUTPUT)
+    with ZipFile(payload) as mod:
+        assert mod.testzip() is None and mod.namelist() == ['meta.xml', 'res/' + RESOURCE]
+        assert mod.read('res/' + RESOURCE) == patched
+    print('Scaleform renderer tags replaced: %d' % count)
+    return payload.getvalue()
 
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         sys.exit('usage: python pack_stock_filter.py PATH_TO_GUI_PART3_PKG')
-    main(sys.argv[1])
+    payload = stock_filter(sys.argv[1])
+    with ZipFile(OUTPUT, 'w', ZIP_DEFLATED) as release:
+        release.writestr('mods/2.4.1.1/' + MOD_NAME, payload)
+    with ZipFile(OUTPUT) as release:
+        assert release.testzip() is None and release.namelist() == ['mods/2.4.1.1/' + MOD_NAME]
+    print(OUTPUT)
