@@ -25,3 +25,13 @@ struct ITfCandidateListUIElementBehavior : ITfCandidateListUIElement {
 };
 #endif
 inline constexpr IID candidateBehaviorId{0x85fad185, 0x58ce, 0x497a, {0x94, 0x60, 0x35, 0x53, 0x66, 0xb6, 0x4b, 0x9a}};
+
+// ctffunc.h is missing from the bundled MinGW SDK.
+struct NumberedCandidateUI : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SetIntegrationStyle(GUID) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetSelectionStyle(int*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE OnKeyDown(WPARAM, LPARAM, BOOL*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ShowCandidateNumbers(BOOL*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE FinalizeExactCompositionString() = 0;
+};
+inline constexpr IID numberedCandidateId{0xc7a6f54f, 0xb180, 0x416f, {0xb2, 0xbf, 0x7b, 0xf2, 0xe4, 0x68, 0x3d, 0x7b}};

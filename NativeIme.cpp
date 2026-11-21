@@ -307,6 +307,35 @@ bool chooseCandidate(unsigned serial, unsigned row) {
     auto behavior = candidateBehavior(page.list.get());
     if (!behavior) return false;
     const UINT index = page.first + row;
+    // Offer the displayed page-relative accelerator to its owner. A partial
+    // choice can then advance the composition just as a physical digit does.
+    const char* route = "candidate behavior";
+    BOOL handled = FALSE;
+    if (row < 9) {
+        NumberedCandidateUI* raw = nullptr;
+        if (page.list->QueryInterface(numberedCandidateId, reinterpret_cast<void**>(&raw)) == S_OK && raw) {
+            Com<NumberedCandidateUI> numbered(raw);
+            BOOL numbers = FALSE;
+            if (numbered->ShowCandidateNumbers(&numbers) == S_OK && numbers) {
+                const WPARAM key = '1' + row;
+                const LPARAM flags = 1 | (MapVirtualKeyW(static_cast<UINT>(key), MAPVK_VK_TO_VSC) << 16);
+                if (FAILED(numbered->OnKeyDown(key, flags, &handled))) return false;
+                if (handled) route = "numbered candidate";
+            }
+        }
+    }
+#ifndef TEST_CANDIDATE_UI
+    static thread_local unsigned reports = 0;
+    if (reports < 16) { ++reports; PySys_WriteStdout("[WotNativeIme] mouse route: %s\n", route); }
+#else
+    (void)route;
+#endif
+    if (handled) {
+        s.candidates = CandidatePage{};
+        return true;
+    }
+    if (!s.store || !s.store->composing || s.candidates.serial != serial ||
+        s.store->composition != page.composition) return false;
     if (behavior->SetSelection(index) != S_OK) return false;
     // SetSelection can end the text-store composition synchronously. The selected
     // candidate behavior still needs its own confirmation to consume the reading.
