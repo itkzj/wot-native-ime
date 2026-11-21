@@ -115,8 +115,8 @@ def _tick():
         if status != _status:
             _status = status
             print('[WotNativeIme] ' + _status_labels[status])
-        if status == 2 and _diag_budget:
-            # V3-only trace. Sample about twice a second and log only changes.
+        if status in (2, 3, 4) and _diag_budget:
+            # Sample about twice a second and log only changes.
             if _diag_ticks == 0:
                 report = _library.ImeDiagnostics()
                 if report != _diag_last:
@@ -228,7 +228,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V3 mod loaded')
+        print('[WotNativeIme] V4 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

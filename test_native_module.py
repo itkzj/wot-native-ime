@@ -9,7 +9,9 @@ path = os.path.abspath('build/_wot_native_ime.pyd')
 ime = imp.load_dynamic('_wot_native_ime', path)
 assert ime.ImeStatus() == 0
 assert ime.ImeDiagnostics() == ('focus=0 tip=0 blocked=0 down=0 processKey=0 wanted=0 '
-                                'handled=0 noSink=0 failed=0 composition=0 caret=0/0')
+                                'handled=0 noSink=0 failed=0 composition=0 caret=0/0 draftDetach=0 '
+                                'tsfFlags=0/0x0 uiSamples=0 candidates=0 shown=0 '
+                                'imeContext=0/0x0 immCandidate=0/0/0 caretScreen=0,0,0,0')
 try:
     ime.ImeStart(None, None)
 except TypeError:

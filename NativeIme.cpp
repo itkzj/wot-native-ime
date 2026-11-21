@@ -48,6 +48,10 @@ thread_local State s;
 thread_local struct Diagnostics {
     TextStore::Activity store;
     unsigned blocked = 0, keyDown = 0, processKey = 0, wanted = 0, eaten = 0, noSink = 0, failed = 0;
+    unsigned draftDetach = 0, uiSamples = 0, candidates = 0, shown = 0;
+    unsigned immOpen = 0, immChange = 0, immClose = 0, imeSetContext = 0;
+    DWORD imeFlags = 0;
+    RECT caret{};
 } diagnostics;
 
 struct Busy {
@@ -57,6 +61,38 @@ struct Busy {
 
 template<class T> void release(T*& value) {
     if (value) { auto* old = value; value = nullptr; old->Release(); }
+}
+
+void sampleCandidateUI() {
+    if (!s.store || !s.store->composing) return;
+    ITfUIElementMgr* ui = nullptr;
+    if (FAILED(s.manager->QueryInterface(__uuidof(ITfUIElementMgr), reinterpret_cast<void**>(&ui)))) return;
+    IEnumTfUIElements* elements = nullptr;
+    ui->EnumUIElements(&elements);
+    release(ui);
+    if (!elements) return;
+    ++diagnostics.uiSamples;
+
+    // This SDK has the UI manager but not ITfCandidateListUIElement. Only query its identity.
+    constexpr IID candidateListId{0xea1ea138, 0x19df, 0x11d7, {0xa6, 0xd2, 0x00, 0x06, 0x5b, 0x84, 0x43, 0x5c}};
+    // ponytail: snapshots can miss short-lived UI; advise ITfUIElementSink if needed.
+    unsigned candidates = 0, shown = 0;
+    ITfUIElement* element = nullptr;
+    ULONG fetched = 0;
+    while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
+        IUnknown* candidate = nullptr;
+        if (element->QueryInterface(candidateListId, reinterpret_cast<void**>(&candidate)) == S_OK) {
+            ++candidates;
+            BOOL visible = FALSE;
+            if (element->IsShown(&visible) == S_OK && visible) ++shown;
+        }
+        release(candidate);
+        release(element);
+    }
+    release(element);
+    release(elements);
+    diagnostics.candidates = std::max(diagnostics.candidates, candidates);
+    diagnostics.shown = std::max(diagnostics.shown, shown);
 }
 
 HWND gameWindow() {
@@ -154,8 +190,10 @@ void locate() {
         POINT first{MulDiv(client.right, r[4], 10000), MulDiv(client.bottom, r[5], 10000)};
         POINT last{MulDiv(client.right, r[6], 10000), MulDiv(client.bottom, r[7], 10000)};
         if (ClientToScreen(s.window, &a) && ClientToScreen(s.window, &b) &&
-            ClientToScreen(s.window, &first) && ClientToScreen(s.window, &last))
-            s.store->layout({a.x, a.y, b.x, b.y}, {first.x, first.y, last.x, last.y});
+            ClientToScreen(s.window, &first) && ClientToScreen(s.window, &last)) {
+            diagnostics.caret = {a.x, a.y, b.x, b.y};
+            s.store->layout(diagnostics.caret, {first.x, first.y, last.x, last.y});
+        }
     }
 }
 
@@ -210,8 +248,11 @@ void sync() {
     if (!foreground()) { detach(); return; }
     const auto keyboard = GetKeyboardLayout(0);
     const bool imm = legacy(keyboard);
+    const bool draftChangedDuringComposition = s.token && (s.immComposing || (s.store && s.store->composing)) &&
+                                               !(s.base == s.sample.draft) && s.token == s.sample.token;
+    if (draftChangedDuringComposition) ++diagnostics.draftDetach;
     if (s.token && (s.token != s.sample.token || s.keyboard != keyboard || s.imm != imm ||
-                   ((s.immComposing || (s.store && s.store->composing)) && !(s.base == s.sample.draft)))) detach();
+                    draftChangedDuringComposition)) detach();
     if (!s.sample.token) return;
     const bool newField = !s.token;
     if (newField) {
@@ -331,6 +372,14 @@ void immResult(LPARAM flags) {
 }
 
 LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
+    if (w && message == WM_IME_SETCONTEXT) {
+        ++diagnostics.imeSetContext;
+        diagnostics.imeFlags = static_cast<DWORD>(l);
+    } else if (message == WM_IME_NOTIFY) {
+        if (w == IMN_OPENCANDIDATE) ++diagnostics.immOpen;
+        if (w == IMN_CHANGECANDIDATE) ++diagnostics.immChange;
+        if (w == IMN_CLOSECANDIDATE) ++diagnostics.immClose;
+    }
     if (message == WM_NCDESTROY) {
         if (!s.busy) { Busy busy; detach(); }
         RemoveWindowSubclass(window, wndProc, id);
@@ -433,7 +482,7 @@ void WINAPI ImeStop() {
 void WINAPI ImeTick() {
     if (s.busy || !s.hook) return;
     Busy busy;
-    try { flushTsf(); sync(); }
+    try { flushTsf(); sync(); sampleCandidateUI(); }
     catch (...) { detach(); }
 }
 
@@ -541,12 +590,22 @@ PyObject* diagnosticsPython(PyObject*, PyObject*) {
     release(focused);
     CLSID tip{};
     const bool hasTip = s.keys && s.keys->GetForeground(&tip) == S_OK && !IsEqualGUID(tip, GUID_NULL);
+    ITfThreadMgrEx* managerEx = nullptr;
+    DWORD flags = 0;
+    const bool flagsKnown = s.manager &&
+        SUCCEEDED(s.manager->QueryInterface(__uuidof(ITfThreadMgrEx), reinterpret_cast<void**>(&managerEx))) &&
+        SUCCEEDED(managerEx->GetActiveFlags(&flags));
+    release(managerEx);
     const auto& d = diagnostics;
-    char report[256];
+    char report[640];
     std::snprintf(report, sizeof report,
-                  "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u composition=%u caret=%u/%u",
+                  "focus=%d tip=%d blocked=%u down=%u processKey=%u wanted=%u handled=%u noSink=%u failed=%u "
+                  "composition=%u caret=%u/%u draftDetach=%u tsfFlags=%d/0x%lx uiSamples=%u candidates=%u shown=%u "
+                  "imeContext=%u/0x%lx immCandidate=%u/%u/%u caretScreen=%ld,%ld,%ld,%ld",
                   ownsFocus, hasTip, d.blocked, d.keyDown, d.processKey, d.wanted, d.eaten, d.noSink, d.failed,
-                  d.store.composition, d.store.textExtOk, d.store.textExt);
+                  d.store.composition, d.store.textExtOk, d.store.textExt, d.draftDetach, flagsKnown, flags,
+                  d.uiSamples, d.candidates, d.shown, d.imeSetContext, d.imeFlags,
+                  d.immOpen, d.immChange, d.immClose, d.caret.left, d.caret.top, d.caret.right, d.caret.bottom);
     return PyString_FromString(report);
 }
 
