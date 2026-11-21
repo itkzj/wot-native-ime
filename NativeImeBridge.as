@@ -18,7 +18,6 @@ package {
     import flash.text.TextFormat;
     import flash.text.TextLineMetrics;
     import net.wg.infrastructure.base.AbstractView;
-    import scaleform.gfx.Extensions;
 
     public class NativeImeBridge extends AbstractView {
         private static const STOCK:Object = {
@@ -51,9 +50,6 @@ package {
         private var pendingChoice:Array;
         private var stockImeWindows:Array = [];
         private var stockFocusStage:Stage;
-        private var suppressedField:TextField;
-        private var triedSuppression:uint;
-        private var suppressionResult:int;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -90,7 +86,7 @@ package {
             }
         }
 
-        public function as_watchFocus(enabled:Boolean, tsfGeneration:uint = 0):void {
+        public function as_watchFocus(enabled:Boolean):void {
             var movie:Stage = enabled ? inputStage() : null;
             if (movie !== stockFocusStage) {
                 if (stockFocusStage) stockFocusStage.removeEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true);
@@ -99,44 +95,6 @@ package {
             }
             if (movie) focused();
             showStockStatus(!movie || !field);
-            if (!movie || !field || tsfGeneration != generation) {
-                restoreStockFieldIme();
-            } else if (triedSuppression != generation) {
-                triedSuppression = generation;
-                var target:TextField = field;
-                suppressedField = target;
-                suppressionResult = applyStockFieldIme(target, false);
-                if (suppressionResult != 1 && suppressedField === target) suppressedField = null;
-            }
-        }
-
-        public function as_stockFieldSuppression():int {
-            return suppressedField ? 1 : (triedSuppression == generation ? suppressionResult : 0);
-        }
-
-        private function applyStockFieldIme(target:TextField, enabled:Boolean):int {
-            try {
-                if (callStockFieldIme(target, enabled)) return 1;
-            } catch (error:Error) {
-                return -error.errorID - 2;
-            }
-            return -1;
-        }
-
-        private function callStockFieldIme(target:TextField, enabled:Boolean):Boolean {
-            if (!Extensions.isScaleform) return false;
-            Extensions.setIMEEnabled(target, enabled);
-            return true;
-        }
-
-        private function restoreStockFieldIme():void {
-            if (!suppressedField) return;
-            var previouslySuppressed:TextField = suppressedField;
-            suppressedField = null;
-            triedSuppression = 0;
-            suppressionResult = 0;
-            var restored:int = applyStockFieldIme(previouslySuppressed, true);
-            if (restored != 1) trace("[WotNativeIme] Scaleform IME restore result " + restored);
         }
 
         private function stockFocusIn(event:FocusEvent):void {
@@ -168,7 +126,6 @@ package {
 
         private function setField(next:TextField):void {
             if (next === field) return;
-            restoreStockFieldIme();
             showStockStatus(!next || !stockFocusStage);
             hideCandidates();
             if (field) {

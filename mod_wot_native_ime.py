@@ -120,18 +120,17 @@ def _update_candidates(view, page):
         _error('Could not update the candidate panel')
 
 
-def _update_stock_status(view, generation=0):
+def _update_stock_status(view):
     global _stock_hidden
-    requested = (view, generation) if view else None
-    if requested == _stock_hidden:
+    if view is _stock_hidden:
         return
     try:
-        if _stock_hidden and _stock_hidden[0] is not view:
-            _stock_hidden[0].flashObject.as_watchFocus(False)
+        if _stock_hidden:
+            _stock_hidden.flashObject.as_watchFocus(False)
             _stock_hidden = None
         if view:
-            view.flashObject.as_watchFocus(True, generation)
-            _stock_hidden = requested
+            view.flashObject.as_watchFocus(True)
+            _stock_hidden = view
     except Exception:
         _error('Could not update stock IME state')
 
@@ -158,8 +157,7 @@ def _tick():
                 _library.ImeTick(serial, row)
         _update_candidates(view, _library.ImeCandidates() if attached else _EMPTY_CANDIDATES)
         status = _library.ImeStatus()
-        generation = _binding[1] if status == 2 and _binding and _binding[0] is view else 0
-        _update_stock_status(view if status in (1, 2, 3) else None, generation)
+        _update_stock_status(view if status in (1, 2, 3) else None)
         if status != _status:
             _status = status
             print('[WotNativeIme] ' + _status_labels[status])
@@ -167,8 +165,6 @@ def _tick():
             # Sample about twice a second and log only changes.
             if _diag_ticks == 0:
                 report = _library.ImeDiagnostics()
-                if status == 2:
-                    report += ' stockFieldSuppression=%d' % int(view.flashObject.as_stockFieldSuppression())
                 if report != _diag_last:
                     print('[WotNativeIme] TSF diagnostic ' + report)
                     _diag_last = report
@@ -208,7 +204,7 @@ class NativeImeView(View):
 
     def _dispose(self):
         global _lobby, _battle, _binding, _candidate_display, _stock_hidden
-        if _stock_hidden and _stock_hidden[0] is self:
+        if _stock_hidden is self:
             _stock_hidden = None
         if _candidate_display and _candidate_display[0] is self:
             _candidate_display = None
@@ -282,7 +278,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V15 mod loaded')
+        print('[WotNativeIme] V16 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

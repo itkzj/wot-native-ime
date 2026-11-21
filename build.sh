@@ -14,7 +14,7 @@ cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
 "$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -DTEST_CANDIDATE_UI test_text_store.cpp NativeIme.cpp \
     -o build/test_text_store.exe -lole32 -loleaut32 -luuid -limm32
 ./build/test_text_store.exe
-"$flex/compc" -source-path=extern -include-classes net.wg.infrastructure.base.AbstractView scaleform.gfx.Extensions \
+"$flex/compc" -source-path=extern -include-classes net.wg.infrastructure.base.AbstractView \
     -target-player=32.0 -output=build/extern.swc
 "$flex/mxmlc" -compiler.external-library-path+=build/extern.swc -target-player=32.0 \
     -swf-version=17 -output=build/NativeImeBridge.swf NativeImeBridge.as
