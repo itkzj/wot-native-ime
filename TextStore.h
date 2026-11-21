@@ -31,7 +31,6 @@ public:
     Draft draft;
     RECT caret{}, field{}; // Screen coordinates in the window's DPI context.
     bool composing = false, acceptComposition = true;
-    unsigned composition = 0;
     bool cancelled = false, finishedComposition = false;
     explicit TextStore(HWND hwnd, const Draft& initial) : window(hwnd), draft(initial) {}
     ~TextStore() { if (sink) sink->Release(); }
@@ -238,10 +237,7 @@ public:
     HRESULT STDMETHODCALLTYPE RetrieveRequestedAttrs(ULONG, TS_ATTRVAL*, ULONG* found) override { *found = 0; return S_OK; }
     HRESULT STDMETHODCALLTYPE OnStartComposition(ITfCompositionView*, BOOL* yes) override {
         *yes = acceptComposition && !composing;
-        if (*yes) {
-            composing = true;
-            ++composition;
-        }
+        if (*yes) composing = true;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnUpdateComposition(ITfCompositionView*, ITfRange*) override { return S_OK; }

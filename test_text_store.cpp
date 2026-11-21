@@ -9,35 +9,15 @@ bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, 
 bool testImmCandidatePage(const void*, DWORD, bool);
 bool testImmPreview();
 
-struct Candidate final : ITfCandidateListUIElementBehavior, NumberedCandidateUI {
+struct Candidate final : ITfCandidateListUIElement {
     ITfDocumentMgr* document;
     ULONG refs = 1;
-    UINT selection = 3, finalizations = 0;
-    TextStore* endDuringSelection = nullptr;
-    std::wstring pendingPinyin;
-    bool acceptNumbers = false;
-    unsigned numberCalls = 0;
-    HRESULT STDMETHODCALLTYPE SetIntegrationStyle(GUID) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE GetSelectionStyle(int*) override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE ShowCandidateNumbers(BOOL* show) override { *show = TRUE; return S_OK; }
-    HRESULT STDMETHODCALLTYPE FinalizeExactCompositionString() override { return E_NOTIMPL; }
-    HRESULT STDMETHODCALLTYPE OnKeyDown(WPARAM key, LPARAM, BOOL* eaten) override {
-        *eaten = key == '1';
-        if (*eaten) ++numberCalls;
-        return S_OK;
-    }
     bool shown = false;
     explicit Candidate(ITfDocumentMgr* owner) : document(owner) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
         *out = nullptr;
-        if (iid == numberedCandidateId && acceptNumbers) {
-            *out = static_cast<NumberedCandidateUI*>(this);
-            AddRef();
-            return S_OK;
-        }
-        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElement) && iid != candidateListId &&
-            iid != candidateBehaviorId) return E_NOINTERFACE;
-        *out = static_cast<ITfCandidateListUIElementBehavior*>(this);
+        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElement) && iid != candidateListId) return E_NOINTERFACE;
+        *out = static_cast<ITfCandidateListUIElement*>(this);
         AddRef();
         return S_OK;
     }
@@ -54,7 +34,7 @@ struct Candidate final : ITfCandidateListUIElementBehavior, NumberedCandidateUI 
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetCount(UINT* count) override { *count = 4; return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetSelection(UINT* index) override { *index = selection; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetSelection(UINT* index) override { *index = 3; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetString(UINT index, BSTR* value) override {
         const wchar_t* rows[] = {L"first", L"second", L"\u6d4b", L"\u8bd5"};
         if (index >= 4) return E_INVALIDARG;
@@ -72,13 +52,6 @@ struct Candidate final : ITfCandidateListUIElementBehavior, NumberedCandidateUI 
     }
     HRESULT STDMETHODCALLTYPE SetPageIndex(UINT*, UINT) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* page) override { *page = 1; return S_OK; }
-    HRESULT STDMETHODCALLTYPE SetSelection(UINT index) override {
-        selection = index;
-        if (endDuringSelection) endDuringSelection->OnEndComposition(nullptr);
-        return S_OK;
-    }
-    HRESULT STDMETHODCALLTYPE Finalize() override { ++finalizations; pendingPinyin.clear(); return S_OK; }
-    HRESULT STDMETHODCALLTYPE Abort() override { return E_NOTIMPL; }
 };
 
 int main() {
@@ -185,19 +158,6 @@ int main() {
     assert(testCandidateUI(manager, document, store, &candidate, &foreign));
     assert(!candidate.shown && foreign.shown);
     assert(candidate.refs == 1 && foreign.refs == 1);
-    assert(candidate.selection == 2 && candidate.finalizations == 1 && !foreign.finalizations);
-    // The TIP can end the store composition inside SetSelection, before its
-    // candidate behavior receives the explicit confirmation that consumes the reading.
-    candidate.selection = 3;
-    candidate.endDuringSelection = store;
-    candidate.pendingPinyin = L"ni";
-    assert(testCandidateUI(manager, document, store, &candidate, &foreign));
-    candidate.pendingPinyin += L"hao";
-    assert(candidate.pendingPinyin == L"hao" && candidate.finalizations == 2);
-    candidate.selection = 3;
-    candidate.acceptNumbers = true;
-    assert(testCandidateUI(manager, document, store, &candidate, &foreign));
-    assert(candidate.numberCalls == 1 && candidate.finalizations == 2);
     other->Release();
 
     document->Pop(TF_POPF_ALL);

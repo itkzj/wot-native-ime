@@ -5,7 +5,7 @@ from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 from pack_stock_filter import RESOURCE, stock_registration
 
-VERSION = '1.0.2'
+VERSION = '1.0.3'
 ROOT = 'mods/2.4.1.1/'
 
 

@@ -7,7 +7,6 @@ package {
     import flash.display.Stage;
     import flash.events.Event;
     import flash.events.FocusEvent;
-    import flash.events.MouseEvent;
     import flash.geom.Matrix;
     import flash.geom.Point;
     import flash.geom.Rectangle;
@@ -38,16 +37,12 @@ package {
         private var battle:Boolean;
         private var bridgeDetached:Boolean;
         private var candidatePanel:Sprite;
-        private var candidateStage:Stage;
         private var candidateLabels:Array;
         private var preeditText:String;
-        private var candidateSerial:uint;
         private var candidateSelection:int = -1;
         private var candidateLimit:Number;
         private var candidateWidth:Number;
         private var candidateHeight:Number;
-        private var pressedRow:int = -1;
-        private var pendingChoice:Array;
         private var stockImeWindows:Array = [];
         private var stockFocusStage:Stage;
         private var watchFocus:Boolean;
@@ -244,9 +239,9 @@ package {
                 normalized(viewport.right, screen.width), normalized(viewport.bottom, screen.height)];
         }
 
-        public function as_candidates(serial:uint, selection:int, clickable:Boolean, labels:Array, preedit:String):void {
+        public function as_candidates(selection:int, labels:Array, preedit:String):void {
             var movie:Stage = focused();
-            if (!field || serial == 0 || !labels || labels.length > 16 || !preedit && labels.length == 0 ||
+            if (!field || !labels || labels.length > 16 || !preedit && labels.length == 0 ||
                 preedit && preedit.length > 8192) {
                 hideCandidates();
                 return;
@@ -257,63 +252,30 @@ package {
                 hideCandidates();
                 return;
             }
-            if (serial != candidateSerial || !candidatePanel || candidatePanel.parent !== movie) {
+            for each (var label:* in labels) {
+                if (!(label is String) || label.length > 256) { hideCandidates(); return; }
+            }
+            if (!candidatePanel || candidatePanel.parent !== movie) {
                 hideCandidates();
-                for each (var label:* in labels) {
-                    if (!(label is String) || label.length > 256) return;
-                }
-                candidateLabels = labels.concat();
-                preeditText = preedit;
-                candidateSerial = serial;
                 candidatePanel = new Sprite();
+                candidatePanel.mouseEnabled = false;
                 candidatePanel.mouseChildren = false;
                 candidatePanel.tabEnabled = false;
                 candidatePanel.tabChildren = false;
-                candidatePanel.addEventListener(MouseEvent.MOUSE_DOWN, candidateDown);
-                candidatePanel.addEventListener(MouseEvent.CLICK, candidateClick);
-                // The service view can sit under chat or be clipped. Use the focused movie's Stage.
                 movie.addChild(candidatePanel);
-                candidateStage = movie;
-                movie.addEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true, 100, true);
-                candidateLimit = -1;
             }
-            if (!clickable) {
-                pendingChoice = null;
-                pressedRow = -1;
-            }
-            candidatePanel.mouseEnabled = clickable;
-            var row:int = selection >= 0 && selection < candidateLabels.length ? selection : -1;
-            if (row != candidateSelection) {
-                candidateSelection = row;
-                if (candidatePanel.numChildren) paintCandidates();
-            }
+            candidateLabels = labels.concat();
+            preeditText = preedit;
+            candidateSelection = selection >= 0 && selection < labels.length ? selection : -1;
+            candidateLimit = -1;
             positionCandidates(movie, screen, caret);
         }
 
-        public function as_takeChoice():Array {
-            if (!pendingChoice) return null;
-            var movie:Stage = focused();
-            if (!candidatePanel || candidatePanel.parent !== movie) {
-                hideCandidates();
-                return null;
-            }
-            var choice:Array = pendingChoice;
-            pendingChoice = null;
-            return choice;
-        }
-
         private function hideCandidates():void {
-            if (candidateStage) candidateStage.removeEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true);
-            var panel:Sprite = candidatePanel;
+            if (candidatePanel && candidatePanel.parent) candidatePanel.parent.removeChild(candidatePanel);
             candidatePanel = null;
-            candidateStage = null;
             candidateLabels = null;
             preeditText = null;
-            candidateSerial = 0;
-            candidateSelection = -1;
-            pressedRow = -1;
-            pendingChoice = null;
-            if (panel && panel.parent) panel.parent.removeChild(panel);
         }
 
         private function positionCandidates(movie:Stage, screen:Rectangle, caret:Rectangle):void {
@@ -337,7 +299,6 @@ package {
 
         private function layoutCandidates(limit:Number):void {
             candidateLimit = limit;
-            pressedRow = -1;
             while (candidatePanel.numChildren) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
             var format:TextFormat = new TextFormat("Microsoft YaHei", 14, 0xDCD8CB);
             var preeditFormat:TextFormat = new TextFormat("Microsoft YaHei", 14, 0xF1E7C8, true);
@@ -396,35 +357,6 @@ package {
             }
             graphics.lineStyle(1, 0x6E6952);
             graphics.drawRect(0.5, 0.5, candidateWidth - 1, candidateHeight - 1);
-        }
-
-        private function preserveFieldFocus(event:FocusEvent):void {
-            if (event.target === field && candidatePanel && candidatePanel.mouseEnabled &&
-                (event.relatedObject === candidatePanel || (!event.relatedObject &&
-                    candidatePanel.getBounds(candidatePanel).contains(candidatePanel.mouseX, candidatePanel.mouseY)))) {
-                event.preventDefault();
-            }
-        }
-
-        private function candidateRow(y:Number):int {
-            var offset:int = preeditText ? 1 : 0;
-            for (var i:int = offset; i < candidatePanel.numChildren; ++i) {
-                var text:TextField = candidatePanel.getChildAt(i) as TextField;
-                if (y >= text.y && y < text.y + rowHeight(text)) return i - offset;
-            }
-            return -1;
-        }
-
-        private function candidateDown(event:MouseEvent):void {
-            event.stopPropagation();
-            pressedRow = candidateRow(event.localY);
-        }
-
-        private function candidateClick(event:MouseEvent):void {
-            event.stopPropagation();
-            var row:int = candidateRow(event.localY);
-            if (!pendingChoice && row >= 0 && row == pressedRow) pendingChoice = [candidateSerial, row];
-            pressedRow = -1;
         }
 
         private function splitPair(value:String, index:int):Boolean {

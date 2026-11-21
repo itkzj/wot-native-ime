@@ -7,7 +7,6 @@
 #include "CandidateList.h"
 #include <array>
 #include <commctrl.h>
-#include <cstdio>
 #include <cstring>
 #include <imm.h>
 #include <memory>
@@ -34,10 +33,7 @@ struct ReleaseCom {
 template<class T> using Com = std::unique_ptr<T, ReleaseCom>;
 
 struct CandidatePage {
-    Com<ITfCandidateListUIElement> list;
-    unsigned serial = 0, composition = 0, first = 0;
     int selection = -1;
-    bool clickable = false;
     std::vector<std::wstring> labels;
     std::wstring preedit;
 };
@@ -69,7 +65,6 @@ struct State {
     std::array<bool, ImeKeyCount> swallowed{};
 };
 thread_local State s;
-thread_local unsigned candidateSerial = 0;
 struct Busy {
     Busy() { s.busy = true; }
     ~Busy() { s.busy = false; }
@@ -107,12 +102,6 @@ Com<ITfCandidateListUIElement> ownedCandidate(ITfUIElement* element) {
     return ours ? std::move(candidate) : nullptr;
 }
 
-Com<ITfCandidateListUIElementBehavior> candidateBehavior(ITfCandidateListUIElement* candidate) {
-    ITfCandidateListUIElementBehavior* raw = nullptr;
-    candidate->QueryInterface(candidateBehaviorId, reinterpret_cast<void**>(&raw));
-    return Com<ITfCandidateListUIElementBehavior>(raw);
-}
-
 constexpr unsigned MaxCandidateRows = 16;
 constexpr DWORD MaxCandidateBytes = 64 * 1024;
 
@@ -126,12 +115,12 @@ bool readImmPage(const void* buffer, DWORD bytes, CandidatePage& page) {
         list.dwPageStart >= list.dwCount || !list.dwPageSize) return false;
     const auto* data = static_cast<const unsigned char*>(buffer);
     const auto strings = header + list.dwCount * sizeof(DWORD);
-    page.first = list.dwPageStart;
+    const DWORD first = list.dwPageStart;
     const auto rows = std::min({list.dwCount - list.dwPageStart, list.dwPageSize,
                                 static_cast<DWORD>(MaxCandidateRows)});
     for (DWORD row = 0; row < rows; ++row) {
         DWORD offset = 0;
-        std::memcpy(&offset, data + header + (page.first + row) * sizeof(DWORD), sizeof offset);
+        std::memcpy(&offset, data + header + (first + row) * sizeof(DWORD), sizeof offset);
         if (offset < strings || offset >= list.dwSize || offset % sizeof(wchar_t)) return false;
         std::wstring text;
         bool terminated = false;
@@ -145,14 +134,13 @@ bool readImmPage(const void* buffer, DWORD bytes, CandidatePage& page) {
         if (!terminated || text.empty()) return false;
         page.labels.push_back(std::move(text));
     }
-    if (list.dwSelection >= page.first && list.dwSelection - page.first < rows)
-        page.selection = static_cast<int>(list.dwSelection - page.first);
+    if (list.dwSelection >= first && list.dwSelection - first < rows)
+        page.selection = static_cast<int>(list.dwSelection - first);
     return true;
 }
 
-bool readCandidatePage(CandidatePage& page) {
-    auto& list = *page.list;
-    UINT count = 0, pageCount = 0, current = 0;
+bool readCandidatePage(ITfCandidateListUIElement& list, CandidatePage& page) {
+    UINT count = 0, pageCount = 0, current = 0, first = 0;
     if (list.GetCount(&count) != S_OK || !count) return false;
     UINT last = count;
     if (list.GetPageIndex(nullptr, 0, &pageCount) == S_OK && pageCount > 1) {
@@ -161,17 +149,17 @@ bool readCandidatePage(CandidatePage& page) {
         std::vector<UINT> offsets(pageCount);
         if (list.GetPageIndex(offsets.data(), pageCount, &pageCount) != S_OK ||
             pageCount != offsets.size() || offsets.front() != 0) return false;
-        page.first = offsets[current];
+        first = offsets[current];
         if (current + 1 < pageCount) last = offsets[current + 1];
-        if (page.first >= last || last > count) return false;
+        if (first >= last || last > count) return false;
     } else if (count > MaxCandidateRows) {
         return false;
     }
-    last = page.first + std::min(last - page.first, MaxCandidateRows);
+    last = first + std::min(last - first, MaxCandidateRows);
     UINT selected = 0;
-    if (list.GetSelection(&selected) == S_OK && selected >= page.first && selected < last)
-        page.selection = static_cast<int>(selected - page.first);
-    for (UINT index = page.first; index < last; ++index) {
+    if (list.GetSelection(&selected) == S_OK && selected >= first && selected < last)
+        page.selection = static_cast<int>(selected - first);
+    for (UINT index = first; index < last; ++index) {
         BSTR text = nullptr;
         const HRESULT result = list.GetString(index, &text);
         const std::unique_ptr<wchar_t, decltype(&SysFreeString)> owned(text, SysFreeString);
@@ -179,7 +167,6 @@ bool readCandidatePage(CandidatePage& page) {
         if (result != S_OK || !length || length > 256 || std::wmemchr(text, L'\0', length)) return false;
         page.labels.emplace_back(text, length);
     }
-    page.clickable = bool(candidateBehavior(page.list.get()));
     return true;
 }
 
@@ -255,12 +242,11 @@ void sampleCandidateUI() {
                 BOOL visible = FALSE;
                 const HRESULT result = list->IsShown(&visible);
                 if (result != S_OK) continue;
-                if (!next.list) {
+                if (next.labels.empty()) {
                     CandidatePage page;
-                    page.list = std::move(list);
                     BOOL stillVisible = TRUE;
-                    if (readCandidatePage(page) && (!visible ||
-                        (page.list->Show(FALSE) == S_OK && page.list->IsShown(&stillVisible) == S_OK && !stillVisible))) {
+                    if (readCandidatePage(*list, page) && (!visible ||
+                        (list->Show(FALSE) == S_OK && list->IsShown(&stillVisible) == S_OK && !stillVisible))) {
                         next = std::move(page);
                         continue;
                     }
@@ -274,11 +260,8 @@ void sampleCandidateUI() {
             release(element);
         }
     }
-    if (!next.list && !nativeVisible && s.immListMask && composing()) {
-        next.first = s.immCandidates.first;
-        next.selection = s.immCandidates.selection;
-        next.labels = s.immCandidates.labels;
-    }
+    if (next.labels.empty() && !nativeVisible && s.immListMask && composing())
+        next = s.immCandidates;
     if (!nativeVisible) {
         if (s.store) next.preedit = compositionText(s.context, *s.store);
         else if (s.immComposing) {
@@ -286,62 +269,7 @@ void sampleCandidateUI() {
             next.preedit = immText(imc.handle, GCS_COMPSTR);
         }
     }
-    if (!next.labels.empty() || !next.preedit.empty()) {
-        const auto& old = s.candidates;
-        next.composition = s.store ? s.store->composition : 0;
-        if (next.list == old.list && next.composition == old.composition && next.first == old.first &&
-            next.labels == old.labels && next.clickable == old.clickable && next.preedit == old.preedit) {
-            next.serial = old.serial;
-        } else {
-            if (++candidateSerial == 0) ++candidateSerial;
-            next.serial = candidateSerial;
-        }
-    }
     s.candidates = std::move(next);
-}
-
-bool chooseCandidate(unsigned serial, unsigned row) {
-    const auto& page = s.candidates;
-    if (!serial || serial != page.serial || !page.clickable || row >= page.labels.size() ||
-        !s.store || !s.store->composing) return false;
-    auto behavior = candidateBehavior(page.list.get());
-    if (!behavior) return false;
-    const UINT index = page.first + row;
-    // Offer the displayed page-relative accelerator to its owner. A partial
-    // choice can then advance the composition just as a physical digit does.
-    const char* route = "candidate behavior";
-    BOOL handled = FALSE;
-    if (row < 9) {
-        NumberedCandidateUI* raw = nullptr;
-        if (page.list->QueryInterface(numberedCandidateId, reinterpret_cast<void**>(&raw)) == S_OK && raw) {
-            Com<NumberedCandidateUI> numbered(raw);
-            BOOL numbers = FALSE;
-            if (numbered->ShowCandidateNumbers(&numbers) == S_OK && numbers) {
-                const WPARAM key = '1' + row;
-                const LPARAM flags = 1 | (MapVirtualKeyW(static_cast<UINT>(key), MAPVK_VK_TO_VSC) << 16);
-                if (FAILED(numbered->OnKeyDown(key, flags, &handled))) return false;
-                if (handled) route = "numbered candidate";
-            }
-        }
-    }
-#ifndef TEST_CANDIDATE_UI
-    static thread_local unsigned reports = 0;
-    if (reports < 16) { ++reports; PySys_WriteStdout("[WotNativeIme] mouse route: %s\n", route); }
-#else
-    (void)route;
-#endif
-    if (handled) {
-        s.candidates = CandidatePage{};
-        return true;
-    }
-    if (!s.store || !s.store->composing || s.candidates.serial != serial ||
-        s.store->composition != page.composition) return false;
-    if (behavior->SetSelection(index) != S_OK) return false;
-    // SetSelection can end the text-store composition synchronously. The selected
-    // candidate behavior still needs its own confirmation to consume the reading.
-    if (behavior->Finalize() != S_OK) return false;
-    s.candidates = CandidatePage{};
-    return true;
 }
 
 #ifdef TEST_CANDIDATE_UI
@@ -350,7 +278,7 @@ bool chooseCandidate(unsigned serial, unsigned row) {
 bool testImmCandidatePage(const void* buffer, DWORD bytes, bool valid) {
     CandidatePage page;
     if (!valid) return !readImmPage(buffer, bytes, page);
-    return readImmPage(buffer, bytes, page) && page.first == 1 && page.selection == 1 &&
+    return readImmPage(buffer, bytes, page) && page.selection == 1 &&
            page.labels == std::vector<std::wstring>{L"\u4f60", L"\u597d"};
 }
 
@@ -360,10 +288,10 @@ bool testImmPreview() {
     s.immListMask = 1;
     s.immCandidates.labels = {L"\u4f60\u597d"};
     sampleCandidateUI();
-    const bool shown = s.candidates.serial && s.candidates.labels.size() == 1;
+    const bool shown = s.candidates.labels == s.immCandidates.labels;
     s.immComposing = false;
     sampleCandidateUI();
-    const bool closed = !s.candidates.serial && s.candidates.labels.empty();
+    const bool closed = s.candidates.labels.empty();
     s = State{};
     return shown && closed;
 }
@@ -374,9 +302,9 @@ std::wstring testPreedit(ITfThreadMgr* manager, ITfContext* context, TextStore* 
     s.store = store;
     sampleCandidateUI();
     auto text = std::move(s.candidates.preedit);
-    const bool visible = s.candidates.serial && s.candidates.labels.empty() && !s.candidates.clickable;
+    const bool preeditOnly = s.candidates.labels.empty();
     s = State{};
-    return visible ? std::move(text) : std::wstring{};
+    return preeditOnly ? std::move(text) : std::wstring{};
 }
 
 bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore* store,
@@ -394,24 +322,15 @@ bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore*
         DWORD foreignId = 0, ownId = 0;
         const bool foreignStarted = ui->BeginUIElement(foreign, &show, &foreignId) == S_OK;
         sampleCandidateUI();
-        success = foreignStarted && !s.candidates.serial;
+        success = foreignStarted && s.candidates.labels.empty();
         const bool ownStarted = ui->BeginUIElement(ours, &show, &ownId) == S_OK;
         sampleCandidateUI();
-        const auto serial = s.candidates.serial;
-        success = success && ownStarted && serial && s.candidates.first == 2 &&
-                  s.candidates.selection == 1 && s.candidates.clickable &&
+        success = success && ownStarted && s.candidates.selection == 1 &&
                   s.candidates.labels == std::vector<std::wstring>{L"\u6d4b", L"\u8bd5"};
-        sampleCandidateUI();
-        success = success && s.candidates.serial == serial && !chooseCandidate(serial, 2);
-        ++store->composition; // A new composition may reuse the very same list and labels.
-        sampleCandidateUI();
-        const auto current = s.candidates.serial;
-        success = success && current && current != serial && !chooseCandidate(serial, 0) &&
-                  chooseCandidate(current, 0) && !s.candidates.serial;
         if (ownStarted && ui->EndUIElement(ownId) != S_OK) success = false;
         if (foreignStarted && ui->EndUIElement(foreignId) != S_OK) success = false;
         sampleCandidateUI();
-        success = success && !s.candidates.serial;
+        success = success && s.candidates.labels.empty();
     }
     release(ui);
     store->composing = false;
@@ -616,7 +535,7 @@ void handleKey(MSG& msg) {
     const bool follow = tracked && s.swallowed[key];
     if (tracked && up) s.swallowed[key] = false;
 
-    // Flush out-of-band edits (such as selecting a candidate with the mouse) before the next key.
+    // Flush out-of-band TSF edits before the next key.
     flushTsf();
     sync();
     bool eaten = false;
@@ -871,14 +790,13 @@ void WINAPI ImeStop() {
     stop();
 }
 
-void ImeTick(unsigned serial, unsigned row) {
+void ImeTick() {
     if (s.busy || !s.hook) return;
     Busy busy;
     try {
         flushTsf();
         sync();
         sampleCandidateUI();
-        if (serial && chooseCandidate(serial, row)) flushTsf();
     } catch (...) { detach(); }
 }
 
@@ -973,10 +891,8 @@ PyObject* stopPython(PyObject*, PyObject*) {
     Py_RETURN_NONE;
 }
 
-PyObject* tickPython(PyObject*, PyObject* args) {
-    unsigned serial = 0, row = 0;
-    if (!PyArg_ParseTuple(args, "|II:ImeTick", &serial, &row)) return nullptr;
-    ImeTick(serial, row);
+PyObject* tickPython(PyObject*, PyObject*) {
+    ImeTick();
     Py_RETURN_NONE;
 }
 
@@ -990,7 +906,7 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
         if (!label) { Py_DECREF(labels); return nullptr; }
         PyList_SET_ITEM(labels, i, label);
     }
-    return Py_BuildValue("(IiONu#)", page.serial, page.selection, page.clickable ? Py_True : Py_False, labels,
+    return Py_BuildValue("(iNu#)", page.selection, labels,
                          page.preedit.c_str(), static_cast<Py_ssize_t>(page.preedit.size()));
 }
 
@@ -1019,7 +935,7 @@ PyObject* snapshotPython(PyObject*, PyObject* args) {
 PyMethodDef methods[] = {
     {"ImeStart", startPython, METH_VARARGS, nullptr},
     {"ImeStop", stopPython, METH_NOARGS, nullptr},
-    {"ImeTick", tickPython, METH_VARARGS, nullptr},
+    {"ImeTick", tickPython, METH_NOARGS, nullptr},
     {"ImeCandidates", candidatesPython, METH_NOARGS, nullptr},
     {"ImeStatus", statusPython, METH_NOARGS, nullptr},
     {"ImeClear", clearPython, METH_NOARGS, nullptr},

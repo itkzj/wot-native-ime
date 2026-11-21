@@ -32,7 +32,7 @@ _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attache
 _errors = set()
 _candidate_display = None
 _stock_hidden = None
-_EMPTY_CANDIDATES = (0, -1, False, [], u'')
+_EMPTY_CANDIDATES = (-1, [], u'')
 
 
 def _error(where):
@@ -102,16 +102,17 @@ def _load_library():
 
 def _update_candidates(view, page):
     global _candidate_display
-    if _candidate_display == (view, page) or (_candidate_display is None and not page[0]):
+    visible = bool(page[1] or page[2])
+    if _candidate_display == (view, page) or (_candidate_display is None and not visible):
         return
     previous = _candidate_display
     _candidate_display = None
     try:
         if previous and previous[0] is not view:
             previous[0].flashObject.as_candidates(*_EMPTY_CANDIDATES)
-        if page[0] or (previous and previous[0] is view):
+        if visible or (previous and previous[0] is view):
             view.flashObject.as_candidates(*page)
-        if page[0]:
+        if visible:
             _candidate_display = (view, page)
     except Exception:
         _error('Could not update the candidate panel')
@@ -145,13 +146,7 @@ def _tick():
     try:
         attached = _library.ImeStart(_refresh, _commit)
         if attached:
-            choice = view.flashObject.as_takeChoice() if (
-                _candidate_display and _candidate_display[0] is view and _candidate_display[1][2]) else None
-            if choice is None:
-                _library.ImeTick()
-            else:
-                serial, row = map(int, choice)
-                _library.ImeTick(serial, row)
+            _library.ImeTick()
         status = _library.ImeStatus()
         page = _library.ImeCandidates() if attached and status in (2, 3) else _EMPTY_CANDIDATES
         _update_candidates(view, page)
@@ -265,7 +260,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V1.0.2 mod loaded')
+        print('[WotNativeIme] V1.0.3 mod loaded')
     except Exception:
         _error('Could not register native IME')
 
