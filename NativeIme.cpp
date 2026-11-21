@@ -1,7 +1,10 @@
 #define NOMINMAX
+#ifndef TEST_CANDIDATE_UI
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#endif
 #include "TextStore.h"
+#include "CandidateList.h"
 #include <array>
 #include <commctrl.h>
 #include <cstdio>
@@ -14,21 +17,6 @@ using Commit = int (WINAPI*)(unsigned, const wchar_t*, int, int, int, const wcha
 namespace {
 constexpr UINT_PTR SubclassId = 1;
 constexpr unsigned ImeKeyCount = 256;
-
-#ifndef __ITfCandidateListUIElement_INTERFACE_DEFINED__
-// Windows SDK msctf.h ABI, available at runtime but missing from this MinGW header.
-struct ITfCandidateListUIElement : ITfUIElement {
-    virtual HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetDocumentMgr(ITfDocumentMgr**) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetCount(UINT*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetSelection(UINT*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetString(UINT, BSTR*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetPageIndex(UINT*, UINT, UINT*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetPageIndex(UINT*, UINT) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT*) = 0;
-};
-#endif
-constexpr IID candidateListId{0xea1ea138, 0x19df, 0x11d7, {0xa6, 0xd2, 0x00, 0x06, 0x5b, 0x84, 0x43, 0x5c}};
 
 struct Snapshot {
     unsigned token = 0;
@@ -137,6 +125,22 @@ void sampleCandidateUI() {
     diagnostics.shown = std::max(diagnostics.shown, shown);
 }
 
+#ifdef TEST_CANDIDATE_UI
+}
+
+bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore* store) {
+    s.manager = manager;
+    s.document = document;
+    s.store = store;
+    store->composing = true;
+    ++diagnostics.store.composition;
+    sampleCandidateUI();
+    store->composing = false;
+    s = State{};
+    return diagnostics.candidates == 1 && diagnostics.shown == 1 &&
+           diagnostics.showAttempts == 1 && diagnostics.showResult == S_OK;
+}
+#else
 HWND gameWindow() {
     const HWND window = GetFocus();
     if (!window || window != GetForegroundWindow() || GetWindow(window, GW_OWNER) ||
@@ -681,3 +685,4 @@ PyMethodDef methods[] = {
 }
 
 PyMODINIT_FUNC init_wot_native_ime() { Py_InitModule("_wot_native_ime", methods); }
+#endif

@@ -1,7 +1,42 @@
 #define NOMINMAX
 #include "TextStore.h"
+#include "CandidateList.h"
 #include <cassert>
 #include <cstdio>
+
+bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*);
+
+struct Candidate final : ITfCandidateListUIElement {
+    ITfDocumentMgr* document;
+    ULONG refs = 1;
+    bool shown = false;
+    explicit Candidate(ITfDocumentMgr* owner) : document(owner) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        *out = nullptr;
+        if (iid != IID_IUnknown && iid != __uuidof(ITfUIElement) && iid != candidateListId) return E_NOINTERFACE;
+        *out = static_cast<ITfCandidateListUIElement*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --refs; }
+    HRESULT STDMETHODCALLTYPE GetDescription(BSTR*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetGUID(GUID* guid) override { *guid = candidateListId; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Show(BOOL show) override { shown = show != FALSE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE IsShown(BOOL* show) override { *show = shown; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetDocumentMgr(ITfDocumentMgr** owner) override {
+        document->AddRef();
+        *owner = document;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCount(UINT* count) override { *count = 1; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetSelection(UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetString(UINT, BSTR*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetPageIndex(UINT*, UINT, UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetPageIndex(UINT*, UINT) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT*) override { return E_NOTIMPL; }
+};
 
 int main() {
     assert(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)));
@@ -9,7 +44,10 @@ int main() {
     assert(SUCCEEDED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
                                      __uuidof(ITfThreadMgr), reinterpret_cast<void**>(&manager))));
     TfClientId id = 0;
-    assert(SUCCEEDED(manager->Activate(&id)));
+    ITfThreadMgrEx* extended = nullptr;
+    assert(manager->QueryInterface(__uuidof(ITfThreadMgrEx), reinterpret_cast<void**>(&extended)) == S_OK);
+    assert(SUCCEEDED(extended->ActivateEx(&id, TF_TMAE_UIELEMENTENABLEDONLY)));
+    extended->Release();
     ITfDocumentMgr* document = nullptr;
     assert(SUCCEEDED(manager->CreateDocumentMgr(&document)));
     auto* store = new TextStore(nullptr, {L"abc", 1, 2, false});
@@ -74,6 +112,20 @@ int main() {
     assert(SUCCEEDED(outcome));
     assert(store->draft.text == L"a\u4f60\u597dc" && store->draft.first == 3 && store->draft.last == 3);
     assert(!store->composing && store->finishedComposition);
+
+    // Keep the candidate provider in a separate translation unit from the sampler,
+    // just as the real Windows input method lives outside the mod DLL.
+    ITfUIElementMgr* ui = nullptr;
+    assert(manager->QueryInterface(__uuidof(ITfUIElementMgr), reinterpret_cast<void**>(&ui)) == S_OK);
+    Candidate candidate(document);
+    BOOL show = FALSE;
+    DWORD element = 0;
+    assert(ui->BeginUIElement(&candidate, &show, &element) == S_OK);
+    assert(testCandidateUI(manager, document, store) && candidate.shown);
+    assert(ui->EndUIElement(element) == S_OK);
+    ui->Release();
+    assert(candidate.refs == 1);
+
     document->Pop(TF_POPF_ALL);
     context->Release();
     document->Release();
@@ -81,5 +133,5 @@ int main() {
     manager->Deactivate();
     manager->Release();
     CoUninitialize();
-    std::puts("TSF document, selection replacement and composition lifecycle passed");
+    std::puts("TSF document, selection replacement, composition lifecycle and candidate UI passed");
 }
