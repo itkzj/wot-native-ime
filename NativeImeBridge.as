@@ -50,10 +50,9 @@ package {
         private var pendingChoice:Array;
         private var stockImeWindows:Array = [];
         private var stockFocusStage:Stage;
-        private var stockCandidate:Sprite;
-        private var stockCandidateAlpha:Number;
-        private var stockCandidateMouse:Boolean;
-        private var stockCandidateChildren:Boolean;
+        private var setStockFieldIme:Function;
+        private var suppressedField:TextField;
+        private var triedSuppression:uint;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -70,6 +69,10 @@ package {
             if (domain.hasDefinition("scaleform.gfx.FocusManager")) {
                 var manager:Object = domain.getDefinition("scaleform.gfx.FocusManager");
                 getFocus = manager.getFocus;
+            }
+            if (domain.hasDefinition("scaleform.gfx.Extensions")) {
+                var extensions:Object = domain.getDefinition("scaleform.gfx.Extensions");
+                if ("setIMEEnabled" in extensions) setStockFieldIme = extensions["setIMEEnabled"] as Function;
             }
         }
 
@@ -90,7 +93,7 @@ package {
             }
         }
 
-        public function as_watchFocus(enabled:Boolean):void {
+        public function as_watchFocus(enabled:Boolean, tsfGeneration:uint = 0):void {
             var movie:Stage = enabled ? inputStage() : null;
             if (movie !== stockFocusStage) {
                 if (stockFocusStage) stockFocusStage.removeEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true);
@@ -99,6 +102,24 @@ package {
             }
             if (movie) focused();
             showStockStatus(!movie || !field);
+            if (!movie || !field || tsfGeneration != generation) {
+                restoreStockFieldIme();
+            } else if (setStockFieldIme != null && triedSuppression != generation) {
+                triedSuppression = generation;
+                suppressedField = field;
+                setStockFieldIme(suppressedField, false);
+            }
+        }
+
+        public function as_stockFieldSuppressed():Boolean {
+            return suppressedField != null;
+        }
+
+        private function restoreStockFieldIme():void {
+            if (!suppressedField) return;
+            var previouslySuppressed:TextField = suppressedField;
+            suppressedField = null;
+            setStockFieldIme(previouslySuppressed, true);
         }
 
         private function stockFocusIn(event:FocusEvent):void {
@@ -130,6 +151,7 @@ package {
 
         private function setField(next:TextField):void {
             if (next === field) return;
+            restoreStockFieldIme();
             showStockStatus(!next || !stockFocusStage);
             hideCandidates();
             if (field) {
@@ -237,10 +259,7 @@ package {
                 hideCandidates();
                 return null;
             }
-            if (candidatePanel) {
-                positionCandidates(movie, screen, caret);
-                if (stockCandidate && stockCandidate.stage === movie) stockCandidate.alpha = 0;
-            }
+            if (candidatePanel) positionCandidates(movie, screen, caret);
             var first:int = field.selectionBeginIndex;
             var last:int = field.selectionEndIndex;
             return [generation, field.text, first, last, first != last && field.caretIndex == first,
@@ -282,7 +301,6 @@ package {
                 candidateStage = movie;
                 movie.addEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true, 100, true);
                 candidateLimit = -1;
-                if (labels.length) hideStockCandidate(movie);
             }
             if (!clickable) {
                 pendingChoice = null;
@@ -309,41 +327,7 @@ package {
             return choice;
         }
 
-        private function hideStockCandidate(movie:Stage):void {
-            // ponytail: candidate clips in this movie only, host-only clips need an exposed Scaleform control.
-            var remaining:Array = [movie];
-            for (var i:int = 0; i < remaining.length && i < 768; ++i) {
-                var parent:DisplayObjectContainer = remaining[i] as DisplayObjectContainer;
-                var node:Sprite = parent.getChildByName("candidateList") as Sprite;
-                var api:Object = node;
-                if (node && api["SetList"] is Function && api["ClearList"] is Function &&
-                    api["SelectDataItem"] is Function) {
-                    stockCandidate = node;
-                    stockCandidateAlpha = node.alpha;
-                    stockCandidateMouse = node.mouseEnabled;
-                    stockCandidateChildren = node.mouseChildren;
-                    node.alpha = 0;
-                    node.mouseEnabled = node.mouseChildren = false;
-                    return;
-                }
-                for (var childIndex:int = 0; childIndex < parent.numChildren && remaining.length < 768; ++childIndex) {
-                    var container:DisplayObjectContainer = parent.getChildAt(childIndex) as DisplayObjectContainer;
-                    if (container && container !== candidatePanel) remaining.push(container);
-                }
-            }
-        }
-
-        public function as_stockCandidateHidden():Boolean {
-            return stockCandidate != null && stockCandidate.stage === candidateStage;
-        }
-
         private function hideCandidates():void {
-            if (stockCandidate) {
-                stockCandidate.alpha = stockCandidateAlpha;
-                stockCandidate.mouseEnabled = stockCandidateMouse;
-                stockCandidate.mouseChildren = stockCandidateChildren;
-                stockCandidate = null;
-            }
             if (candidateStage) candidateStage.removeEventListener(FocusEvent.MOUSE_FOCUS_CHANGE, preserveFieldFocus, true);
             var panel:Sprite = candidatePanel;
             candidatePanel = null;
