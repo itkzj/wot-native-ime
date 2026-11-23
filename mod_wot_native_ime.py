@@ -17,9 +17,10 @@ from messenger.gui.Scaleform.view.battle.messenger_view import BattleMessengerVi
 from skeletons.gui.app_loader import IAppLoader
 from skeletons.gui.impl import IGuiLoader
 
+from gui.mods.wot_native_ime_paths import native_library
+
 LOBBY = 'WotNativeImeLobby'
 BATTLE = 'WotNativeImeBattle'
-LIBRARY = os.path.join('mods', '2.4.1.1', '_wot_native_ime.pyd')
 _lobby = _battle = _battle_owner = None
 _library = None
 _tick_id = None
@@ -92,12 +93,10 @@ def _commit(token, before, first, last, leading, after, new_first, new_last, new
 
 
 def _load_library():
-    executable_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else os.getcwd()
-    for root in (executable_dir, os.path.dirname(executable_dir), os.getcwd()):
-        path = os.path.join(root, LIBRARY)
-        if os.path.isfile(path):
-            return imp.load_dynamic('_wot_native_ime', path)
-    raise IOError('_wot_native_ime.pyd is missing from mods/2.4.1.1')
+    path = native_library(sys.executable, os.getcwdu())
+    library = imp.load_dynamic('_wot_native_ime', path)
+    print('[WotNativeIme] native module: %r' % path)
+    return library
 
 
 def _update_candidates(view, page):
@@ -260,7 +259,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V1.0.3 mod loaded')
+        print('[WotNativeIme] V1.0.4 mod loaded')
     except Exception:
         _error('Could not register native IME')
 
