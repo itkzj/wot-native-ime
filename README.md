@@ -1,11 +1,11 @@
 # 坦克世界国服输入法修复
 
-适用于《坦克世界》国服 2.4.1.1 x64。车库聊天、联系人搜索和战斗聊天使用原版输入框。Windows 当前输入法负责组字、选词和确认，游戏负责发送或搜索。候选和组字预览显示在光标旁，预览按输入法提供的文本显示。候选面板仅供查看，使用当前输入法的数字键或空格选词。
+适用于《坦克世界》国服 2.4.2.0 x64。车库聊天、联系人搜索和战斗聊天使用原版输入框。Windows 当前输入法负责组字、选词和确认，游戏负责发送或搜索。候选和组字预览显示在光标旁，预览按输入法提供的文本显示。候选面板仅供查看，使用当前输入法的数字键或空格选词。
 
 ## 安装和回退
 
-1. 退出游戏，将旧版 `wot.native.ime_*.wotmod`、`wot.native.ime.stock-filter_*.wotmod` 和 `_wot_native_ime.pyd` 移出 `mods/2.4.1.1/`，一并保留作为备份。
-2. 将 V1.0.4 完整安装包解压到游戏根目录（[已发布版本](https://github.com/itkzj/wot-native-ime/releases)）。本次构建的 `mods/2.4.1.1/` 下包含 `wot.native.ime_1.0.4.wotmod`、`_wot_native_ime.pyd` 和 `wot.native.ime.stock-filter_1.0.4.wotmod`。
+1. 退出游戏，将旧版 `wot.native.ime_*.wotmod`、`wot.native.ime.stock-filter_*.wotmod` 和 `_wot_native_ime.pyd` 移出 `mods/2.4.2.0/`，一并保留作为备份。
+2. 将 V1.0.5 完整安装包解压到游戏根目录（[已发布版本](https://github.com/itkzj/wot-native-ime/releases)）。本次构建的 `mods/2.4.2.0/` 下包含 `wot.native.ime_1.0.5.wotmod`、`_wot_native_ime.pyd` 和 `wot.native.ime.stock-filter_1.0.5.wotmod`。
 3. 在公共聊天输入一组拼音，确认光标旁只出现一个候选框。按数字选词后，文字应只上屏一次，候选框随即关闭。随后按 `Enter` 由游戏发送。在联系人搜索和战斗聊天也可按此方式检查。
 
 游戏小更新只更换版本目录时，退出游戏，将上述三个同版文件一起放入新版本的 `mods/<版本>/`。V1.0.4 起，脚本读取游戏根目录 `paths.xml` 中的 `.wotmod` 挂载路径，不扫描其他版本。成功后可在 `game.log` 搜索 `[WotNativeIme] native module:` 核对实际加载路径。若客户端改变了游戏接口、Python 运行时或输入法去重配置，仍需重新适配；移动文件不代表新版已通过兼容性验证。

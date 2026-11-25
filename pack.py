@@ -7,7 +7,7 @@ from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 from pack_stock_filter import RESOURCE, stock_registration
 from wot_native_ime_paths import mods_mount
 
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 
 
 def wotmod(identifier, name, files):
@@ -31,7 +31,7 @@ def read(path):
 if len(sys.argv) > 2:
     sys.exit('usage: python pack.py [PATH_TO_GUI_PART3_PKG]')
 ROOT = (mods_mount(os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), '..', '..')))
-        if len(sys.argv) == 2 else 'mods/2.4.1.1') + '/'
+        if len(sys.argv) == 2 else 'mods/2.4.2.0') + '/'
 scripts = []
 for name in ('mod_wot_native_ime', 'wot_native_ime_paths'):
     output = 'build/' + name + '.pyc'
