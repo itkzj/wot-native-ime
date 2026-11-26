@@ -1,5 +1,5 @@
 #define NOMINMAX
-#ifndef TEST_CANDIDATE_UI
+#if !defined(TEST_CANDIDATE_UI) && !defined(TEST_IME_ROUTING)
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #endif
@@ -51,16 +51,23 @@ struct State {
     ITfDocumentMgr* previous = nullptr;
     ITfContext* context = nullptr;
     CandidatePage candidates, immCandidates;
+    Com<ITfCandidateListUIElement> hiddenCandidate;
     DWORD immListMask = 0;
     bool readingImm = false;
     TextStore* store = nullptr;
     TfClientId client = 0;
     bool coInitialized = false, activated = false, associated = false;
     bool busy = false, imm = false, immComposing = false;
+    unsigned immLifecycle = 0;
     bool attachFailed = false;
     unsigned token = 0, attachment = 0;
     HKL keyboard = nullptr;
     Draft base;
+    struct PendingImm {
+        unsigned attachment = 0;
+        Draft before;
+        std::wstring text;
+    } pendingImm;
     Snapshot sample;
     std::array<bool, ImeKeyCount> swallowed{};
 };
@@ -68,7 +75,7 @@ thread_local State s;
 struct Busy {
     const bool previous = s.busy;
     Busy() { s.busy = true; }
-    ~Busy() { s.busy = previous; }
+    ~Busy();
 };
 
 template<class T> void release(T*& value) {
@@ -223,10 +230,25 @@ std::wstring immText(HIMC handle, DWORD kind) {
 
 bool composing() { return s.store ? s.store->composing : s.immComposing; }
 
+bool sameCandidate(ITfCandidateListUIElement* a, ITfCandidateListUIElement* b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    // A provider can return distinct interface pointers for the same COM object.
+    IUnknown *left = nullptr, *right = nullptr;
+    const bool same = SUCCEEDED(a->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&left))) &&
+                      SUCCEEDED(b->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&right))) && left == right;
+    release(left);
+    release(right);
+    return same;
+}
+
 void sampleCandidateUI() {
     CandidatePage next;
     bool nativeVisible = false;
     if (s.store && s.store->composing) {
+        // Choose the page before hiding it: another visible list can require native UI.
+        Com<ITfCandidateListUIElement> chosen;
+        bool chosenVisible = false, hiddenPresent = false, complete = false;
         auto* ui = uiManager();
         IEnumTfUIElements* raw = nullptr;
         if (ui) ui->EnumUIElements(&raw);
@@ -235,32 +257,53 @@ void sampleCandidateUI() {
         if (elements) {
             ITfUIElement* element = nullptr;
             ULONG fetched = 0;
-            while (elements->Next(1, &element, &fetched) == S_OK && fetched == 1 && element) {
+            HRESULT step;
+            while ((step = elements->Next(1, &element, &fetched)) == S_OK && fetched == 1 && element) {
                 Com<ITfUIElement> owned(element);
                 auto list = ownedCandidate(element);
                 element = nullptr;
                 if (!list) continue;
+                const bool hidden = sameCandidate(list.get(), s.hiddenCandidate.get());
+                hiddenPresent |= hidden;
                 BOOL visible = FALSE;
-                const HRESULT result = list->IsShown(&visible);
-                if (result != S_OK) continue;
-                if (next.labels.empty()) {
+                if (list->IsShown(&visible) != S_OK) {
+                    nativeVisible |= hidden;
+                    continue;
+                }
+                if (!chosen && !nativeVisible) {
                     CandidatePage page;
-                    BOOL stillVisible = TRUE;
-                    if (readCandidatePage(*list, page) && (!visible ||
-                        (list->Show(FALSE) == S_OK && list->IsShown(&stillVisible) == S_OK && !stillVisible))) {
+                    if (readCandidatePage(*list, page)) {
                         next = std::move(page);
+                        chosenVisible = visible;
+                        chosen = std::move(list);
                         continue;
                     }
                 }
-                if (visible) {
-                    nativeVisible = true;
-                    next = CandidatePage{};
-                    break;
-                }
+                if (visible || hidden) nativeVisible = true;
             }
+            complete = step == S_FALSE;
             release(element);
         }
-    }
+        if (s.hiddenCandidate && (nativeVisible || !sameCandidate(chosen.get(), s.hiddenCandidate.get()))) {
+            if (hiddenPresent || !complete) {
+                nativeVisible = true;
+                if (s.hiddenCandidate->Show(TRUE) == S_OK) s.hiddenCandidate.reset();
+            } else {
+                s.hiddenCandidate.reset(); // EndUIElement already closed it.
+            }
+        }
+        if (chosenVisible && !nativeVisible) {
+            BOOL stillVisible = TRUE;
+            if (chosen->Show(FALSE) == S_OK) {
+                s.hiddenCandidate = std::move(chosen);
+                if (s.hiddenCandidate->IsShown(&stillVisible) != S_OK || stillVisible) {
+                    nativeVisible = true;
+                    if (s.hiddenCandidate->Show(TRUE) == S_OK) s.hiddenCandidate.reset();
+                }
+            } else nativeVisible = true;
+        }
+        if (nativeVisible) next = CandidatePage{};
+    } else s.hiddenCandidate.reset();
     if (next.labels.empty() && !nativeVisible && s.immListMask && composing())
         next = s.immCandidates;
     if (!nativeVisible) {
@@ -309,7 +352,7 @@ std::wstring testPreedit(ITfThreadMgr* manager, ITfContext* context, TextStore* 
 }
 
 bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore* store,
-                     ITfUIElement* ours, ITfUIElement* foreign) {
+                     ITfUIElement* ours, ITfUIElement* foreign, bool& readable) {
     s.manager = manager;
     s.document = document;
     s.store = store;
@@ -328,6 +371,11 @@ bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore*
         sampleCandidateUI();
         success = success && ownStarted && s.candidates.selection == 1 &&
                   s.candidates.labels == std::vector<std::wstring>{L"\u6d4b", L"\u8bd5"};
+        BOOL visible = TRUE;
+        success = success && ours->IsShown(&visible) == S_OK && !visible;
+        readable = false;
+        sampleCandidateUI();
+        success = success && s.candidates.labels.empty();
         if (ownStarted && ui->EndUIElement(ownId) != S_OK) success = false;
         if (foreignStarted && ui->EndUIElement(foreignId) != S_OK) success = false;
         sampleCandidateUI();
@@ -354,6 +402,11 @@ void clearImmCandidates();
 void detach() {
     if (!s.token && !s.store) return;
     s.token = 0;
+    s.pendingImm = {};
+    if (s.hiddenCandidate) {
+        auto hidden = std::move(s.hiddenCandidate);
+        if (s.store && s.store->composing) hidden->Show(TRUE);
+    }
     s.candidates = CandidatePage{};
     clearImmCandidates();
     ++s.attachment;
@@ -474,9 +527,10 @@ bool valid(const Draft& draft) {
 }
 
 bool commit(const Draft& after) {
-    if (!s.token || !foreground() || !valid(after)) return false;
+    if (!s.token || !foreground()) return false;
     const auto& before = s.base;
     if (after == before) return true;
+    if (!valid(after)) return false;
     if (!s.commit(s.token, before.text.c_str(), before.first, before.last, before.leading,
                   after.text.c_str(), after.first, after.last, after.leading)) return false;
     s.base = after;
@@ -651,17 +705,38 @@ DWORD handleImmCandidates(WPARAM notification, DWORD mask) {
     return mask;
 }
 
-void immResult(LPARAM flags) {
-    if (!(flags & GCS_RESULTSTR)) return;
+void captureImmResult() {
+    const auto attachment = s.attachment;
     const ImmContext imc(s.window);
     const auto text = immText(imc.handle, GCS_RESULTSTR);
-    if (text.empty()) return;
-    Draft next = s.base;
-    next.text.replace(next.first, next.last - next.first, text);
-    next.first += static_cast<LONG>(text.size());
-    next.last = next.first;
-    next.leading = false;
-    if (next.text.size() <= TextStore::Capacity && !commit(next)) detach();
+    if (text.empty() || s.attachment != attachment || !s.imm || !s.token) return;
+    auto& pending = s.pendingImm;
+    if (pending.text.empty() || !(pending.before == s.base)) pending = {attachment, s.base, {}};
+    const auto kept = s.base.text.size() - (s.base.last - s.base.first);
+    if (kept + pending.text.size() + text.size() <= TextStore::Capacity) pending.text += text;
+}
+
+Busy::~Busy() {
+    if (!previous && !s.pendingImm.text.empty()) {
+        try {
+            auto pending = std::move(s.pendingImm);
+            s.pendingImm = {};
+            const auto keyboard = GetKeyboardLayout(0);
+            if (keyboard == s.keyboard && activeRoute(keyboard) == InputRoute::Imm && s.imm &&
+                pending.attachment == s.attachment && s.token && s.sample.token == s.token &&
+                pending.before == s.base && pending.before == s.sample.draft && foreground()) {
+                auto& next = pending.before;
+                next.text.replace(next.first, next.last - next.first, pending.text);
+                next.first += static_cast<LONG>(pending.text.size());
+                next.last = next.first;
+                next.leading = false;
+                if (!commit(next)) detach();
+                // Any synchronous result during commit was based on the pre-commit selection.
+                s.pendingImm = {};
+            }
+        } catch (...) { detach(); }
+    }
+    s.busy = previous;
 }
 
 DWORD filterCandidateNotification(WPARAM notification, DWORD mask) {
@@ -685,17 +760,25 @@ bool ownsImeMessage(bool nested) {
     return false;
 }
 
-bool handleComposition(UINT message, LPARAM flags) {
+bool handleComposition(UINT message, LPARAM flags, bool nested) {
+    if (nested && !ownsImeMessage(true)) return false;
+    const auto lifecycle = s.immLifecycle;
+    if (s.imm && message == WM_IME_COMPOSITION && (flags & GCS_RESULTSTR) && foreground() &&
+        (!nested || s.base == s.sample.draft)) captureImmResult();
+    if (!nested && !ownsImeMessage(false)) return false;
     if (message == WM_IME_ENDCOMPOSITION ||
         (message == WM_IME_COMPOSITION && (flags & GCS_RESULTSTR) && !(flags & GCS_COMPSTR)))
         clearImmCandidates();
     if (!s.imm) return true;
-    const auto attachment = s.attachment;
-    syncAttachment();
-    if (!s.imm || (message != WM_IME_STARTCOMPOSITION && attachment != s.attachment)) return s.token != 0;
-    if (message == WM_IME_STARTCOMPOSITION) s.immComposing = true;
-    if (message == WM_IME_COMPOSITION) immResult(flags);
-    if (message == WM_IME_ENDCOMPOSITION) s.immComposing = false;
+    if (!nested) {
+        const auto attachment = s.attachment;
+        syncAttachment();
+        if (!s.imm || (message != WM_IME_STARTCOMPOSITION && attachment != s.attachment)) return s.token != 0;
+    }
+    if (lifecycle == s.immLifecycle && (message == WM_IME_STARTCOMPOSITION || message == WM_IME_ENDCOMPOSITION)) {
+        s.immComposing = message == WM_IME_STARTCOMPOSITION;
+        ++s.immLifecycle;
+    }
     return true;
 }
 
@@ -722,7 +805,7 @@ void handleQueuedIme(MSG& msg) {
         break;
     }
     case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
-        if (!ownsImeMessage(false) || !handleComposition(msg.message, msg.lParam)) return;
+        if (!handleComposition(msg.message, msg.lParam, false)) return;
         break;
     case WM_IME_CHAR:
         if (!ownsImeMessage(false)) return;
@@ -748,15 +831,10 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
         const bool nested = s.busy;
         Busy busy;
         try {
-            if (ownsImeMessage(nested)) {
+            if (message == WM_IME_STARTCOMPOSITION || message == WM_IME_COMPOSITION || message == WM_IME_ENDCOMPOSITION) {
+                if (handleComposition(message, l, nested)) return 0;
+            } else if (ownsImeMessage(nested)) {
                 switch (message) {
-                case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
-                    if (!nested) {
-                        if (!handleComposition(message, l)) break;
-                    } else if (message == WM_IME_ENDCOMPOSITION) {
-                        clearImmCandidates();
-                    }
-                    return 0;
                 case WM_IME_SETCONTEXT: {
                     const DWORD hidden = (s.immListMask & ISC_SHOWUIALLCANDIDATEWINDOW) |
                                          (s.imm ? ISC_SHOWUICOMPOSITIONWINDOW : 0);
@@ -849,24 +927,29 @@ int WINAPI ImeStatus() {
     return s.attachFailed && s.sample.token ? 4 : 1;
 }
 
-void WINAPI ImeSnapshot(unsigned token, const wchar_t* text,
-                                                       int first, int last, int leading, const int* rects) {
+void updateSnapshot(unsigned token, const wchar_t* text, size_t length,
+                    int first, int last, bool leading, const int* rects) {
     s.sample.token = 0;
-    if (!token || !text || !rects || first < 0 || last < first) return;
-    size_t length = 0;
-    while (length <= TextStore::Capacity && text[length]) ++length;
-    if (length > TextStore::Capacity || static_cast<size_t>(last) > length) return;
+    if (!token || first < 0 || last < first || static_cast<size_t>(last) > length) return;
     for (int i = 0; i < 8; ++i) if (rects[i] < 0 || rects[i] > 10000) return;
     if (rects[0] > rects[2] || rects[1] >= rects[3] || rects[4] >= rects[6] || rects[5] >= rects[7]) return;
     try {
-        Draft draft{std::wstring(text, length), first, last, first != last && leading != 0};
-        if (!valid(draft)) return;
-        s.sample.draft = std::move(draft);
+        const bool atStart = first != last && leading;
+        const auto& prior = s.sample.draft;
+        if (prior.first != first || prior.last != last || prior.leading != atStart ||
+            prior.text.compare(0, prior.text.size(), text, length) != 0) {
+            Draft draft{std::wstring(text, length), first, last, atStart};
+            if (!valid(draft)) return;
+            s.sample.draft = std::move(draft);
+        }
         std::copy_n(rects, 8, s.sample.rects.begin());
         s.sample.token = token;
     } catch (...) { }
 }
 
+#ifdef TEST_IME_ROUTING
+}
+#else
 thread_local PyObject* pyRefresh = nullptr;
 thread_local PyObject* pyCommit = nullptr;
 
@@ -971,7 +1054,7 @@ PyObject* snapshotPython(PyObject*, PyObject* args) {
         PyErr_SetString(PyExc_ValueError, "Invalid UTF-16 snapshot");
         return nullptr;
     }
-    ImeSnapshot(token, text, first, last, leading, r);
+    updateSnapshot(token, text, static_cast<size_t>(length), first, last, leading != 0, r);
     Py_RETURN_NONE;
 }
 
@@ -988,4 +1071,5 @@ PyMethodDef methods[] = {
 }
 
 PyMODINIT_FUNC init_wot_native_ime() { Py_InitModule("_wot_native_ime", methods); }
+#endif
 #endif

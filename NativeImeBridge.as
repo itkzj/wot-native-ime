@@ -1,10 +1,8 @@
 package {
     import flash.display.DisplayObject;
     import flash.display.DisplayObjectContainer;
-    import flash.display.Graphics;
     import flash.display.Loader;
     import flash.display.MovieClip;
-    import flash.display.Sprite;
     import flash.display.Stage;
     import flash.events.Event;
     import flash.events.FocusEvent;
@@ -12,7 +10,6 @@ package {
     import flash.geom.Rectangle;
     import flash.system.ApplicationDomain;
     import flash.text.TextField;
-    import flash.text.TextFieldAutoSize;
     import flash.text.TextFieldType;
     import flash.text.TextLineMetrics;
     import net.wg.infrastructure.base.AbstractView;
@@ -35,14 +32,7 @@ package {
         private var generation:uint;
         private var battle:Boolean;
         private var bridgeDetached:Boolean;
-        private var candidatePanel:Sprite;
-        private var candidateLabels:Array;
-        private var preeditText:String;
-        private var candidateSelection:int = -1;
-        private var candidateLimit:Number;
-        private var candidateWidth:Number;
-        private var candidateHeight:Number;
-        private var highlightY:Number, highlightHeight:Number, separatorY:Number;
+        private var candidatePanel:CandidatePanel;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -117,14 +107,15 @@ package {
             return node is type;
         }
 
-        private function eligible(target:TextField, movie:Stage):Boolean {
+        private function shouldTakeOver(target:TextField, movie:Stage):Boolean {
             if (!target || target.stage !== movie || target.type != TextFieldType.INPUT ||
                 target.displayAsPassword || target.restrict != null || !target.parent) return false;
-            var node:DisplayObject;
-            for (node = target; node; node = node.parent) if (!node.visible || node.alpha <= 0) return false;
             var input:Object = target.parent;
             if (!battle && (!("textField" in input) || input.textField !== target ||
                 !("editable" in input) || !input.editable || !input.enabled)) return false;
+            if (!stockUnsupported(movie)) return false;
+            var node:DisplayObject;
+            for (node = target; node; node = node.parent) if (!node.visible || node.alpha <= 0) return false;
             for (node = target.parent; node; node = node.parent) {
                 if (battle) {
                     if (ownerHas(node, BATTLE, "messageInputField", target)) return true;
@@ -143,7 +134,7 @@ package {
             var movie:Stage = inputStage();
             var target:TextField = !bridgeDetached && movie && domain ?
                 (getFocus != null ? getFocus(0) : movie.focus) as TextField : null;
-            setField(movie && domain && eligible(target, movie) && stockUnsupported(movie) ? target : null);
+            setField(shouldTakeOver(target, movie) ? target : null);
             return movie;
         }
 
@@ -208,7 +199,10 @@ package {
                 hideCandidates();
                 return null;
             }
-            if (candidatePanel) positionCandidates(movie, screen, caret);
+            if (candidatePanel) {
+                if (candidatePanel.parent === movie) candidatePanel.position(screen, caret);
+                else hideCandidates();
+            }
             var first:int = field.selectionBeginIndex;
             var last:int = field.selectionEndIndex;
             return [generation, field.text, first, last, first != last && field.caretIndex == first,
@@ -236,113 +230,15 @@ package {
             }
             if (!candidatePanel || candidatePanel.parent !== movie) {
                 hideCandidates();
-                candidatePanel = new Sprite();
-                candidatePanel.mouseEnabled = false;
-                candidatePanel.mouseChildren = false;
-                candidatePanel.tabEnabled = false;
-                candidatePanel.tabChildren = false;
+                candidatePanel = new CandidatePanel();
                 movie.addChild(candidatePanel);
             }
-            candidateLabels = labels.concat();
-            preeditText = preedit;
-            candidateSelection = selection >= 0 && selection < labels.length ? selection : -1;
-            layoutCandidates(Math.max(24, screen.width - 8));
-            positionCandidates(movie, screen, caret);
+            candidatePanel.showPage(labels, selection, preedit, screen, caret);
         }
 
         private function hideCandidates():void {
             if (candidatePanel && candidatePanel.parent) candidatePanel.parent.removeChild(candidatePanel);
             candidatePanel = null;
-            candidateWidth = 0;
-            candidateLabels = null;
-            preeditText = null;
-        }
-
-        private function positionCandidates(movie:Stage, screen:Rectangle, caret:Rectangle):void {
-            if (candidatePanel.parent !== movie) {
-                hideCandidates();
-                return;
-            }
-            var limit:Number = Math.max(24, screen.width - 8);
-            if (candidateLimit != limit) layoutCandidates(limit);
-            var scale:Number = Math.min(1, screen.width / candidateWidth, screen.height / candidateHeight);
-            candidatePanel.scaleX = candidatePanel.scaleY = scale;
-            var width:Number = candidateWidth * scale;
-            var height:Number = candidateHeight * scale;
-            var y:Number = caret.bottom + 4;
-            if (y + height > screen.height && caret.top - 4 >= height) y = caret.top - 4 - height;
-            candidatePanel.x = Math.max(0, Math.min(caret.left, screen.width - width));
-            candidatePanel.y = Math.max(0, Math.min(y, screen.height - height));
-            if (movie.getChildIndex(candidatePanel) != movie.numChildren - 1)
-                movie.setChildIndex(candidatePanel, movie.numChildren - 1);
-        }
-
-        private function layoutCandidates(limit:Number):void {
-            var resized:Boolean = candidateLimit != limit;
-            var oldWidth:Number = candidateWidth, oldHeight:Number = candidateHeight;
-            candidateLimit = limit;
-            candidateWidth = Math.min(100, limit);
-            candidateHeight = 3;
-            var slot:int = 0;
-            for (var index:int = preeditText ? -1 : 0; index < candidateLabels.length; ++index, ++slot) {
-                var text:TextField;
-                if (slot < candidatePanel.numChildren) text = candidatePanel.getChildAt(slot) as TextField;
-                else {
-                    text = new TextField();
-                    text.embedFonts = false;
-                    text.selectable = false;
-                    text.multiline = true;
-                    text.autoSize = TextFieldAutoSize.LEFT;
-                    text.x = 8;
-                    candidatePanel.addChild(text);
-                }
-                var role:String = index < 0 ? "preedit" : "candidate";
-                var reformat:Boolean = text.name != role;
-                if (reformat) {
-                    text.name = role;
-                    text.defaultTextFormat = CandidateSkin.format(index < 0);
-                }
-                var caption:String = index < 0 ? preeditText :
-                    (index < 9 ? (index + 1) + ". " : "") + candidateLabels[index];
-                if (reformat || resized || text.text != caption) {
-                    if (text.wordWrap) text.wordWrap = false;
-                    if (reformat || text.text != caption) text.text = caption;
-                    if (text.width > limit - 16) {
-                        text.wordWrap = true;
-                        text.width = limit - 16;
-                    }
-                }
-                if (text.y != candidateHeight) text.y = candidateHeight;
-                candidateWidth = Math.max(candidateWidth, Math.ceil(text.width) + 16);
-                candidateHeight += CandidateSkin.rowHeight(text.height);
-            }
-            while (candidatePanel.numChildren > slot) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
-            candidateHeight += 3;
-            paintCandidates(oldWidth, oldHeight);
-        }
-
-        private function paintCandidates(oldWidth:Number, oldHeight:Number):void {
-            var graphics:Graphics = candidatePanel.graphics;
-            var selected:TextField = candidateSelection < 0 ? null :
-                candidatePanel.getChildAt(candidateSelection + (preeditText ? 1 : 0)) as TextField;
-            var y:Number = selected ? selected.y : 0;
-            var h:Number = selected ? CandidateSkin.rowHeight(selected.height) : 0;
-            var divider:Number = 0;
-            if (preeditText && candidateLabels.length) {
-                var header:TextField = candidatePanel.getChildAt(0) as TextField;
-                divider = header.y + CandidateSkin.rowHeight(header.height) - 1;
-            }
-            if (oldWidth == candidateWidth && oldHeight == candidateHeight &&
-                highlightY == y && highlightHeight == h && separatorY == divider) return;
-            highlightY = y;
-            highlightHeight = h;
-            separatorY = divider;
-            CandidateSkin.paint(graphics, candidateWidth, candidateHeight, y, h);
-            if (divider) {
-                graphics.beginFill(0x66614B);
-                graphics.drawRect(6, divider, candidateWidth - 12, 1);
-                graphics.endFill();
-            }
         }
 
         private function splitPair(value:String, index:int):Boolean {

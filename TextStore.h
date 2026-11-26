@@ -121,7 +121,7 @@ public:
         if (!range(first, last)) return TS_E_INVALIDPOS;
         if (count > static_cast<ULONG>(Capacity - end() + last - first)) return E_INVALIDARG;
         *start = first;
-        *finish = first + static_cast<LONG>(count);
+        *finish = last;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetSelection(ULONG index, ULONG count, TS_SELECTION_ACP* sel, ULONG* fetched) override {
@@ -159,24 +159,21 @@ public:
                                       TS_TEXTCHANGE* change) override {
         if (!write()) return TS_E_NOLOCK;
         if (count && !value) return E_INVALIDARG;
-        LONG start, finish;
-        const HRESULT result = QueryInsert(first, last, count, &start, &finish);
+        LONG start, replacedEnd;
+        const HRESULT result = QueryInsert(first, last, count, &start, &replacedEnd);
         if (FAILED(result)) return result;
-        try { draft.text.replace(first, last - first, value ? value : L"", count); }
+        try { draft.text.replace(start, replacedEnd - start, value ? value : L"", count); }
         catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
-        draft.first = draft.last = finish;
+        draft.first = draft.last = start + static_cast<LONG>(count);
         draft.leading = false;
-        *change = {first, last, finish};
+        *change = {start, replacedEnd, draft.last};
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE InsertTextAtSelection(DWORD flags, const WCHAR* value, ULONG count,
                                                      LONG* first, LONG* last, TS_TEXTCHANGE* change) override {
         if (flags & TS_IAS_QUERYONLY) {
             if (!read()) return TS_E_NOLOCK;
-            LONG unused, finish;
-            const HRESULT result = QueryInsert(draft.first, draft.last, count, &unused, &finish);
-            if (SUCCEEDED(result)) { *first = draft.first; *last = draft.last; }
-            return result;
+            return QueryInsert(draft.first, draft.last, count, first, last);
         }
         TS_TEXTCHANGE applied{};
         const HRESULT result = SetText(0, draft.first, draft.last, value, count, &applied);

@@ -21,6 +21,9 @@ cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
 "$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -DTEST_CANDIDATE_UI test_text_store.cpp NativeIme.cpp \
     -o build/test_text_store.exe -lole32 -loleaut32 -luuid -limm32
 ./build/test_text_store.exe
+"$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -DTEST_IME_ROUTING test_ime_routing.cpp \
+    -o build/test_ime_routing.exe -lole32 -loleaut32 -luuid -lcomctl32 -limm32
+./build/test_ime_routing.exe
 "$flex/compc" -source-path=extern -include-classes net.wg.infrastructure.base.AbstractView IME_fla.MainTimeline \
     -target-player=32.0 -output=build/extern.swc
 "$flex/mxmlc" -compiler.external-library-path+=build/extern.swc -target-player=32.0 \

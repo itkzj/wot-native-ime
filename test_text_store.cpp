@@ -1,51 +1,3 @@
-#ifdef TEST_IME_ROUTING
-#include "NativeIme.cpp"
-#include <cassert>
-#include <cstdio>
-
-extern "C" __declspec(dllexport) void testImeRouting() {
-    _set_error_mode(_OUT_TO_STDERR);
-    constexpr LRESULT stock = 71;
-    WNDCLASSW cls{};
-    cls.lpszClassName = L"WotImeRouteTest";
-    cls.lpfnWndProc = [](HWND window, UINT message, WPARAM w, LPARAM l) -> LRESULT {
-        if (message == WM_IME_CHAR || message == WM_KEYDOWN || message == WM_IME_COMPOSITION ||
-            message == WM_IME_NOTIFY || message == WM_IME_SETCONTEXT) return stock;
-        return DefWindowProcW(window, message, w, l);
-    };
-    assert(RegisterClassW(&cls));
-    HWND window = CreateWindowW(cls.lpszClassName, L"", WS_POPUP | WS_VISIBLE,
-                                0, 0, 1, 1, nullptr, nullptr, nullptr, nullptr);
-    SetForegroundWindow(window);
-    SetFocus(window);
-    s.window = window;
-    assert(foreground() && SetWindowSubclass(window, wndProc, SubclassId, 0));
-    s.refresh = [] {
-        // Flash can synchronously dispatch a message before supplying its new snapshot.
-        assert(SendMessageW(s.window, WM_IME_CHAR, 'x', 0) == stock);
-    };
-    for (UINT message : {WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_NOTIFY, WM_KEYDOWN, WM_IME_SETCONTEXT}) {
-        s.token = s.sample.token = 1;
-        s.immListMask = 1;
-        WPARAM w = message == WM_IME_NOTIFY ? IMN_CLOSECANDIDATE : VK_PROCESSKEY;
-        if (message != WM_KEYDOWN && message != WM_IME_SETCONTEXT) {
-            MSG msg{window, message, w, 1, 0, {0, 0}};
-            getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&msg));
-            assert(msg.message == message && msg.wParam == w && msg.lParam == 1);
-        }
-        s.token = s.sample.token = 1;
-        s.immListMask = 1;
-        assert(SendMessageW(window, message, w, 1) == stock);
-    }
-    s.refresh = [] { s.sample.token = 1; };
-    s.token = 1;
-    MSG owned{window, WM_IME_CHAR, 'x', 0, 0, {0, 0}};
-    getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&owned));
-    assert(owned.message == WM_NULL && SendMessageW(window, WM_IME_CHAR, 'x', 0) == 0);
-    DestroyWindow(window);
-    std::puts("Queued and sent IME messages returned to the stock window");
-}
-#else
 #define NOMINMAX
 #include "TextStore.h"
 #include "CandidateList.h"
@@ -53,7 +5,7 @@ extern "C" __declspec(dllexport) void testImeRouting() {
 #include <cstdio>
 
 std::wstring testPreedit(ITfThreadMgr*, ITfContext*, TextStore*);
-bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*);
+bool testCandidateUI(ITfThreadMgr*, ITfDocumentMgr*, TextStore*, ITfUIElement*, ITfUIElement*, bool&);
 bool testImmCandidatePage(const void*, DWORD, bool);
 bool testImmPreview();
 
@@ -61,6 +13,8 @@ struct Candidate final : ITfCandidateListUIElement {
     ITfDocumentMgr* document;
     ULONG refs = 1;
     bool shown = false;
+    bool readable = true;
+    unsigned showCalls = 0;
     explicit Candidate(ITfDocumentMgr* owner) : document(owner) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
         *out = nullptr;
@@ -73,7 +27,7 @@ struct Candidate final : ITfCandidateListUIElement {
     ULONG STDMETHODCALLTYPE Release() override { return --refs; }
     HRESULT STDMETHODCALLTYPE GetDescription(BSTR*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetGUID(GUID* guid) override { *guid = candidateListId; return S_OK; }
-    HRESULT STDMETHODCALLTYPE Show(BOOL show) override { shown = show != FALSE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Show(BOOL show) override { ++showCalls; shown = show != FALSE; return S_OK; }
     HRESULT STDMETHODCALLTYPE IsShown(BOOL* show) override { *show = shown; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetUpdatedFlags(DWORD*) override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE GetDocumentMgr(ITfDocumentMgr** owner) override {
@@ -85,6 +39,7 @@ struct Candidate final : ITfCandidateListUIElement {
     HRESULT STDMETHODCALLTYPE GetSelection(UINT* index) override { *index = 3; return S_OK; }
     HRESULT STDMETHODCALLTYPE GetString(UINT index, BSTR* value) override {
         const wchar_t* rows[] = {L"first", L"second", L"\u6d4b", L"\u8bd5"};
+        if (!readable) return E_FAIL;
         if (index >= 4) return E_INVALIDARG;
         *value = SysAllocString(rows[index]);
         return *value ? S_OK : E_OUTOFMEMORY;
@@ -131,7 +86,8 @@ int main() {
     LONG end = 0;
     assert(store->GetEndACP(&end) == TS_E_NOLOCK);
     LONG first = 0, last = 0;
-    assert(store->QueryInsert(1, 2, 2, &first, &last) == S_OK && first == 1 && last == 3);
+    assert(store->QueryInsert(1, 2, 2, &first, &last) == S_OK && first == 1 && last == 2);
+    assert(store->QueryInsert(3, 3, 2, &first, &last) == S_OK && first == 3 && last == 3);
     assert(store->QueryInsert(2, 4, 1, &first, &last) == TS_E_INVALIDPOS);
 
     // Run an actual TSF edit session so the store's selection, write lock and
@@ -153,6 +109,19 @@ int main() {
         ULONG STDMETHODCALLTYPE Release() override { return --refs; }
         HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie, ITfComposition*) override { return S_OK; }
         HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie token) override {
+            if (store->finishedComposition && !composition) {
+                LONG end = 0, first = -1, last = -1;
+                assert(store->GetEndACP(&end) == S_OK);
+                TS_SELECTION_ACP atEnd{end, end, {TS_AE_END, FALSE}};
+                assert(store->SetSelection(1, &atEnd) == S_OK);
+                assert(store->InsertTextAtSelection(TS_IAS_QUERYONLY, L"xy", 2, &first, &last, nullptr) == S_OK);
+                assert(first == end && last == end);
+                TS_TEXTCHANGE change{};
+                assert(store->InsertTextAtSelection(0, L"xy", 2, &first, &last, &change) == S_OK);
+                assert(first == end && last == end + 2);
+                assert(change.acpStart == end && change.acpOldEnd == end && change.acpNewEnd == last);
+                return S_OK;
+            }
             if (composition) {
                 ITfRange* range = nullptr;
                 HRESULT result = composition->GetRange(&range);
@@ -197,15 +166,23 @@ int main() {
     assert(testPreedit(manager, context, store).empty());
     assert(store->draft.text == L"a\u4f60\u597dc" && store->draft.first == 3 && store->draft.last == 3);
     assert(!store->composing && store->finishedComposition);
+    assert(SUCCEEDED(context->RequestEditSession(id, &insert, TF_ES_SYNC | TF_ES_READWRITE, &outcome)));
+    assert(SUCCEEDED(outcome));
+    assert(store->draft.text == L"a\u4f60\u597dcxy" && store->draft.first == 6 && store->draft.last == 6);
 
     // The test candidate lives in a separate translation unit from the mod's COM client.
     ITfDocumentMgr* other = nullptr;
     assert(manager->CreateDocumentMgr(&other) == S_OK);
     Candidate candidate(document), foreign(other);
-    candidate.shown = foreign.shown = true;
-    assert(testCandidateUI(manager, document, store, &candidate, &foreign));
-    assert(!candidate.shown && foreign.shown);
-    assert(candidate.refs == 1 && foreign.refs == 1);
+    foreign.shown = true;
+    for (bool initiallyShown : {false, true}) {
+        candidate.shown = initiallyShown;
+        candidate.readable = true;
+        candidate.showCalls = 0;
+        assert(testCandidateUI(manager, document, store, &candidate, &foreign, candidate.readable));
+        assert(candidate.shown == initiallyShown && candidate.showCalls == (initiallyShown ? 2u : 0u));
+        assert(foreign.shown && !foreign.showCalls && candidate.refs == 1 && foreign.refs == 1);
+    }
     other->Release();
 
     document->Pop(TF_POPF_ALL);
@@ -217,4 +194,3 @@ int main() {
     CoUninitialize();
     std::puts("TSF document, selection replacement, composition lifecycle and candidate UI passed");
 }
-#endif

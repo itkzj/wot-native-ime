@@ -9,17 +9,14 @@ from wot_native_ime_paths import mods_mount
 VERSION = '1.0.8-beta'
 
 
-def wotmod(identifier, name, files):
-    metadata = '<root><id>%s</id><version>%s</version><name>%s</name></root>' % (identifier, VERSION, name)
-    entries = [('meta.xml', metadata)] + files
-    payload = StringIO()
-    with ZipFile(payload, 'w', ZIP_STORED) as mod:
+def write_archive(destination, entries, compression):
+    with ZipFile(destination, 'w', compression) as bundle:
         for path, data in entries:
-            mod.writestr(path, data)
-    with ZipFile(payload) as mod:
-        assert mod.namelist() == [path for path, _ in entries]
-        assert all(mod.getinfo(path).compress_type == ZIP_STORED and mod.read(path) == data for path, data in entries)
-    return ROOT + identifier + '_' + VERSION + '.wotmod', payload.getvalue()
+            bundle.writestr(path, data)
+    with ZipFile(destination) as bundle:
+        assert bundle.namelist() == [path for path, _ in entries]
+        assert all(bundle.getinfo(path).compress_type == compression and bundle.read(path) == data
+                   for path, data in entries)
 
 
 def read(path):
@@ -36,16 +33,13 @@ for name in ('mod_wot_native_ime', 'wot_native_ime_paths'):
     py_compile.compile(name + '.py', output, name + '.py', doraise=True)
     scripts.append(('res/scripts/client/gui/mods/' + name + '.pyc', read(output)))
 loose_movie = 'res_mods/' + ROOT.split('/', 1)[1] + 'gui/flash/ime.swf'
-files = [wotmod('wot.native.ime', 'WoT Native IME', [
-    ('res/gui/flash/NativeImeBridge.swf', read('build/NativeImeBridge.swf')),
-    ('LICENSE', read('LICENSE')),
-] + scripts), (ROOT + '_wot_native_ime.pyd', read('build/_wot_native_ime.pyd')),
-    (loose_movie, read('build/ime.swf'))]
+metadata = '<root><id>wot.native.ime</id><version>%s</version><name>WoT Native IME</name></root>' % VERSION
+mod = StringIO()
+write_archive(mod, [('meta.xml', metadata),
+                    ('res/gui/flash/NativeImeBridge.swf', read('build/NativeImeBridge.swf')),
+                    ('LICENSE', read('LICENSE'))] + scripts, ZIP_STORED)
 output = 'dist/WotNativeIme_V%s.zip' % VERSION
-with ZipFile(output, 'w', ZIP_DEFLATED) as release:
-    for path, data in files:
-        release.writestr(path, data)
-with ZipFile(output) as release:
-    assert release.namelist() == [path for path, _ in files]
-    assert all(release.read(path) == data for path, data in files)
+write_archive(output, [(ROOT + 'wot.native.ime_' + VERSION + '.wotmod', mod.getvalue()),
+                       (ROOT + '_wot_native_ime.pyd', read('build/_wot_native_ime.pyd')),
+                       (loose_movie, read('build/ime.swf'))], ZIP_DEFLATED)
 print(output)
