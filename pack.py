@@ -7,7 +7,7 @@ from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 from pack_stock_filter import RESOURCE, stock_registration
 from wot_native_ime_paths import mods_mount
 
-VERSION = '1.0.6'
+VERSION = '1.0.7'
 
 
 def wotmod(identifier, name, files):
