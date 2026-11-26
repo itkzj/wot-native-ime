@@ -4,10 +4,9 @@ import py_compile
 import sys
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
-from pack_stock_filter import RESOURCE, stock_registration
 from wot_native_ime_paths import mods_mount
 
-VERSION = '1.0.6'
+VERSION = '1.0.8-beta'
 
 
 def wotmod(identifier, name, files):
@@ -28,23 +27,20 @@ def read(path):
         return source.read()
 
 
-if len(sys.argv) > 2:
-    sys.exit('usage: python pack.py [PATH_TO_GUI_PART3_PKG]')
-ROOT = (mods_mount(os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), '..', '..')))
-        if len(sys.argv) == 2 else 'mods/2.4.2.0') + '/'
+if len(sys.argv) != 2:
+    sys.exit('usage: python pack.py PATH_TO_GUI_PART3_PKG')
+ROOT = mods_mount(os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), '..', '..'))) + '/'
 scripts = []
 for name in ('mod_wot_native_ime', 'wot_native_ime_paths'):
     output = 'build/' + name + '.pyc'
     py_compile.compile(name + '.py', output, name + '.py', doraise=True)
     scripts.append(('res/scripts/client/gui/mods/' + name + '.pyc', read(output)))
 files = [wotmod('wot.native.ime', 'WoT Native IME', [
+    ('res/gui/flash/ime.swf', read('build/ime.swf')),
     ('res/gui/flash/NativeImeBridge.swf', read('build/NativeImeBridge.swf')),
     ('LICENSE', read('LICENSE')),
 ] + scripts), (ROOT + '_wot_native_ime.pyd', read('build/_wot_native_ime.pyd'))]
-if len(sys.argv) == 2:
-    files.append(wotmod('wot.native.ime.stock-filter', 'WoT Native IME Stock Filter', [
-        ('res/' + RESOURCE, stock_registration(sys.argv[1]))]))
-output = 'dist/WotNativeIme_V%s%s.zip' % (VERSION, '' if len(sys.argv) == 2 else '_Core')
+output = 'dist/WotNativeIme_V%s.zip' % VERSION
 with ZipFile(output, 'w', ZIP_DEFLATED) as release:
     for path, data in files:
         release.writestr(path, data)

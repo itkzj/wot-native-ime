@@ -3,6 +3,8 @@ package {
     import flash.display.DisplayObjectContainer;
     import flash.display.GradientType;
     import flash.display.Graphics;
+    import flash.display.Loader;
+    import flash.display.MovieClip;
     import flash.display.Sprite;
     import flash.display.Stage;
     import flash.events.Event;
@@ -43,9 +45,6 @@ package {
         private var candidateLimit:Number;
         private var candidateWidth:Number;
         private var candidateHeight:Number;
-        private var stockImeWindows:Array = [];
-        private var stockFocusStage:Stage;
-        private var watchFocus:Boolean;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -66,7 +65,6 @@ package {
         }
 
         public function as_stop():void {
-            as_watchFocus(false);
             domain = null;
             app = null;
             getFocus = null;
@@ -76,52 +74,28 @@ package {
         private function bridgeStageChanged(event:Event):void {
             if (event.target !== this) return;
             bridgeDetached = event.type == Event.REMOVED_FROM_STAGE;
-            as_watchFocus(watchFocus);
             if (bridgeDetached) setField(null);
         }
 
-        public function as_watchFocus(enabled:Boolean):void {
-            watchFocus = enabled;
-            var movie:Stage = enabled && !bridgeDetached ? inputStage() : null;
-            if (movie !== stockFocusStage) {
-                if (stockFocusStage) stockFocusStage.removeEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true);
-                stockFocusStage = movie;
-                if (movie) movie.addEventListener(FocusEvent.FOCUS_IN, stockFocusIn, true, 100, true);
+        private function stockUnsupported(movie:Stage):Boolean {
+            // The named child is the Loader. SetLastIME writes the tab on its content timeline.
+            try {
+                var ime:Object = app && app.instance && app.utils ? app.utils.IME : null;
+                var container:DisplayObjectContainer = ime ? ime.getContainer() as DisplayObjectContainer : null;
+                if (!container || container.stage !== movie) return false;
+                var loader:Loader = container.getChildByName("LangBar") as Loader;
+                var timeline:MovieClip = loader ? loader.content as MovieClip : null;
+                var tab:MovieClip = timeline ? timeline.IMENameTab_mc as MovieClip : null;
+                var label:TextField = tab ? tab.tf as TextField : null;
+                return label != null && label.text === "Not Supported";
+            } catch (error:Error) {
+                // Loading or disposing the stock view can make its timeline inaccessible.
             }
-            if (movie) focused();
-            showStockStatus(!movie || !field);
-        }
-
-        private function stockFocusIn(event:FocusEvent):void {
-            if (domain && stockFocusStage) {
-                showStockStatus(!eligible(event.target as TextField, stockFocusStage));
-            }
-        }
-
-        private function showStockStatus(show:Boolean):void {
-            if (show) {
-                for each (var state:Array in stockImeWindows) state[0].visible = state[1];
-                stockImeWindows.length = 0;
-                return;
-            }
-            if (!app || !app.utils || !app.utils.IME) return;
-            var container:DisplayObjectContainer = app.utils.IME.getContainer() as DisplayObjectContainer;
-            if (!container) return;
-            for each (var name:String in ["LangBar", "StatusWindow"]) {
-                var child:DisplayObject = container.getChildByName(name);
-                if (!child) continue;
-                var known:Boolean = false;
-                for each (var hidden:Array in stockImeWindows) {
-                    if (hidden[0] === child) { known = true; break; }
-                }
-                if (!known) stockImeWindows.push([child, child.visible]);
-                child.visible = false;
-            }
+            return false;
         }
 
         private function setField(next:TextField):void {
             if (next === field) return;
-            showStockStatus(!next || !stockFocusStage);
             hideCandidates();
             if (field) {
                 field.removeEventListener(FocusEvent.FOCUS_OUT, lostField);
@@ -171,7 +145,7 @@ package {
             var movie:Stage = inputStage();
             var target:TextField = !bridgeDetached && movie && domain ?
                 (getFocus != null ? getFocus(0) : movie.focus) as TextField : null;
-            setField(movie && domain && eligible(target, movie) ? target : null);
+            setField(movie && domain && eligible(target, movie) && stockUnsupported(movie) ? target : null);
             return movie;
         }
 
@@ -239,9 +213,9 @@ package {
                 normalized(viewport.right, screen.width), normalized(viewport.bottom, screen.height)];
         }
 
-        public function as_candidates(selection:int, labels:Array, preedit:String):void {
+        public function as_candidates(expected:uint, selection:int, labels:Array, preedit:String):void {
             var movie:Stage = focused();
-            if (!field || !labels || labels.length > 16 || !preedit && labels.length == 0 ||
+            if (!field || generation != expected || !labels || labels.length > 16 || !preedit && labels.length == 0 ||
                 preedit && preedit.length > 8192) {
                 hideCandidates();
                 return;
@@ -398,8 +372,10 @@ package {
                     return false;
                 }
                 target.dispatchEvent(new Event(Event.CHANGE, true));
+                focused();
             }
-            if (target.text === after) target.setSelection(newLeading ? newLast : newFirst, newLeading ? newFirst : newLast);
+            if (field === target && generation == token && target.text === after)
+                target.setSelection(newLeading ? newLast : newFirst, newLeading ? newFirst : newLast);
             return true;
         }
     }

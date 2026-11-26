@@ -32,7 +32,6 @@ _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attache
                   3: 'IMM attached', 4: 'TSF association failed'}
 _errors = set()
 _candidate_display = None
-_stock_hidden = None
 _EMPTY_CANDIDATES = (-1, [], u'')
 
 
@@ -101,35 +100,20 @@ def _load_library():
 
 def _update_candidates(view, page):
     global _candidate_display
-    visible = bool(page[1] or page[2])
-    if _candidate_display == (view, page) or (_candidate_display is None and not visible):
+    generation = _binding[1] if _binding and _binding[0] is view else 0
+    display = (view, generation, page) if generation and (page[1] or page[2]) else None
+    if display == _candidate_display:
         return
     previous = _candidate_display
     _candidate_display = None
     try:
-        if previous and previous[0] is not view:
-            previous[0].flashObject.as_candidates(*_EMPTY_CANDIDATES)
-        if visible or (previous and previous[0] is view):
-            view.flashObject.as_candidates(*page)
-        if visible:
-            _candidate_display = (view, page)
+        if previous and (not display or previous[0] is not view):
+            previous[0].flashObject.as_candidates(0, *_EMPTY_CANDIDATES)
+        if display:
+            view.flashObject.as_candidates(generation, *page)
+            _candidate_display = display
     except Exception:
         _error('Could not update the candidate panel')
-
-
-def _update_stock_status(view):
-    global _stock_hidden
-    if view is _stock_hidden:
-        return
-    try:
-        if _stock_hidden:
-            _stock_hidden.flashObject.as_watchFocus(False)
-            _stock_hidden = None
-        if view:
-            view.flashObject.as_watchFocus(True)
-            _stock_hidden = view
-    except Exception:
-        _error('Could not update stock IME state')
 
 
 def _tick():
@@ -140,7 +124,6 @@ def _tick():
         if _library is not None:
             _library.ImeStop()
         _update_candidates(None, _EMPTY_CANDIDATES)
-        _update_stock_status(None)
         return
     try:
         attached = _library.ImeStart(_refresh, _commit)
@@ -149,7 +132,6 @@ def _tick():
         status = _library.ImeStatus()
         page = _library.ImeCandidates() if attached and status in (2, 3) else _EMPTY_CANDIDATES
         _update_candidates(view, page)
-        _update_stock_status(view if status in (2, 3) else None)
         if status != _status:
             _status = status
             print('[WotNativeIme] ' + _status_labels[status])
@@ -184,9 +166,7 @@ class NativeImeView(View):
             _error('Could not initialize Scaleform input bridge')
 
     def _dispose(self):
-        global _lobby, _battle, _binding, _candidate_display, _stock_hidden
-        if _stock_hidden is self:
-            _stock_hidden = None
+        global _lobby, _battle, _binding, _candidate_display
         if _candidate_display and _candidate_display[0] is self:
             _candidate_display = None
         if _binding and _binding[0] is self:
@@ -259,7 +239,7 @@ def init():
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
         _enabled = True
-        print('[WotNativeIme] V1.0.6 mod loaded')
+        print('[WotNativeIme] V1.0.8-beta mod loaded')
     except Exception:
         _error('Could not register native IME')
 
@@ -268,7 +248,6 @@ def fini():
     global _enabled, _listening, _tick_id, _binding
     _enabled = False
     _binding = None
-    _update_stock_status(None)
     if _listening:
         g_eventBus.removeListener(events.GUICommonEvent.LOBBY_VIEW_LOADED, _on_lobby_loaded)
         _listening = False

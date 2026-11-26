@@ -66,8 +66,9 @@ struct State {
 };
 thread_local State s;
 struct Busy {
+    const bool previous = s.busy;
     Busy() { s.busy = true; }
-    ~Busy() { s.busy = false; }
+    ~Busy() { s.busy = previous; }
 };
 
 template<class T> void release(T*& value) {
@@ -502,12 +503,13 @@ void flushTsf() {
     }
 }
 
-void sync() {
-    if (!foreground()) { detach(); return; }
+bool refreshSnapshot() {
     s.sample.token = 0;
-    s.refresh();
-    if (!foreground()) { detach(); return; }
-    if (!s.sample.token) { detach(); return; }
+    if (foreground()) s.refresh();
+    return s.sample.token && foreground();
+}
+
+void syncAttachment() {
     const auto keyboard = GetKeyboardLayout(0);
     const auto route = activeRoute(keyboard);
     if (route == InputRoute::Stock) { detach(); s.attachFailed = false; return; }
@@ -534,6 +536,11 @@ void sync() {
         if (s.store) s.store->updateDraft(s.base);
     }
     locate();
+}
+
+void sync() {
+    if (refreshSnapshot()) syncAttachment();
+    else detach();
 }
 
 void handleKey(MSG& msg) {
@@ -670,23 +677,44 @@ DWORD filterCandidateNotification(WPARAM notification, DWORD mask) {
     catch (...) { clearImmCandidates(); return mask; }
 }
 
-void handleComposition(UINT message, LPARAM flags) {
+bool ownsImeMessage(bool nested) {
+    // A synchronous message during as_snapshot must not re-enter Flash or use the old token.
+    if (nested) return s.token && s.sample.token == s.token && foreground();
+    if (refreshSnapshot() && s.sample.token == s.token) return true;
+    detach();
+    return false;
+}
+
+bool handleComposition(UINT message, LPARAM flags) {
     if (message == WM_IME_ENDCOMPOSITION ||
         (message == WM_IME_COMPOSITION && (flags & GCS_RESULTSTR) && !(flags & GCS_COMPSTR)))
         clearImmCandidates();
-    if (!s.imm) return;
+    if (!s.imm) return true;
     const auto attachment = s.attachment;
-    sync();
-    if (!s.imm || (message != WM_IME_STARTCOMPOSITION && attachment != s.attachment)) return;
+    syncAttachment();
+    if (!s.imm || (message != WM_IME_STARTCOMPOSITION && attachment != s.attachment)) return s.token != 0;
     if (message == WM_IME_STARTCOMPOSITION) s.immComposing = true;
     if (message == WM_IME_COMPOSITION) immResult(flags);
     if (message == WM_IME_ENDCOMPOSITION) s.immComposing = false;
+    return true;
+}
+
+bool routedImeMessage(UINT message, WPARAM w) {
+    switch (message) {
+    case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+        return w == VK_PROCESSKEY;
+    case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
+    case WM_IME_CHAR: case WM_IME_NOTIFY: case WM_IME_SETCONTEXT:
+        return true;
+    default: return false;
+    }
 }
 
 void handleQueuedIme(MSG& msg) {
-    if (msg.hwnd != s.window || !s.token || !foreground()) return;
+    if (msg.hwnd != s.window || !s.token) return;
     switch (msg.message) {
     case WM_IME_NOTIFY: {
+        if (!ownsImeMessage(false)) return;
         const auto original = static_cast<DWORD>(msg.lParam);
         const auto remaining = filterCandidateNotification(msg.wParam, original);
         if (remaining == original) return;
@@ -694,9 +722,10 @@ void handleQueuedIme(MSG& msg) {
         break;
     }
     case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
-        handleComposition(msg.message, msg.lParam);
+        if (!ownsImeMessage(false) || !handleComposition(msg.message, msg.lParam)) return;
         break;
     case WM_IME_CHAR:
+        if (!ownsImeMessage(false)) return;
         break;
     default:
         return;
@@ -708,11 +737,6 @@ void handleQueuedIme(MSG& msg) {
 }
 
 LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
-    if (message == WM_IME_NOTIFY) {
-        const DWORD mask = filterCandidateNotification(w, static_cast<DWORD>(l));
-        if (mask != static_cast<DWORD>(l))
-            return mask ? DefWindowProcW(window, message, w, mask) : 0;
-    }
     if (message == WM_NCDESTROY) {
         if (!s.busy) { Busy busy; detach(); }
         RemoveWindowSubclass(window, wndProc, id);
@@ -720,30 +744,34 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
     } else if (!s.busy && (message == WM_KILLFOCUS || message == WM_INPUTLANGCHANGE)) {
         Busy busy;
         detach();
-    } else if (s.token || s.imm) {
-        switch (message) {
-        case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP:
-            if (w == VK_PROCESSKEY) return 0;
-            break;
-        case WM_IME_CHAR:
-            return 0; // GCS_RESULTSTR and TSF are the sole writers.
-        case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
-            if (!s.busy) {
-                Busy busy;
-                try { handleComposition(message, l); }
-                catch (...) { detach(); }
-            } else if (message == WM_IME_ENDCOMPOSITION) {
-                clearImmCandidates();
+    } else if (s.token && routedImeMessage(message, w)) {
+        const bool nested = s.busy;
+        Busy busy;
+        try {
+            if (ownsImeMessage(nested)) {
+                switch (message) {
+                case WM_IME_STARTCOMPOSITION: case WM_IME_COMPOSITION: case WM_IME_ENDCOMPOSITION:
+                    if (!nested) {
+                        if (!handleComposition(message, l)) break;
+                    } else if (message == WM_IME_ENDCOMPOSITION) {
+                        clearImmCandidates();
+                    }
+                    return 0;
+                case WM_IME_SETCONTEXT: {
+                    const DWORD hidden = (s.immListMask & ISC_SHOWUIALLCANDIDATEWINDOW) |
+                                         (s.imm ? ISC_SHOWUICOMPOSITIONWINDOW : 0);
+                    return DefWindowProcW(window, message, w, l & ~static_cast<LPARAM>(hidden));
+                }
+                case WM_IME_NOTIFY: {
+                    const DWORD mask = filterCandidateNotification(w, static_cast<DWORD>(l));
+                    if (mask != static_cast<DWORD>(l))
+                        return mask ? DefWindowProcW(window, message, w, mask) : 0;
+                    return DefWindowProcW(window, message, w, l);
+                }
+                default: return 0; // VK_PROCESSKEY or WM_IME_CHAR; TSF and GCS_RESULTSTR own text.
+                }
             }
-            return 0; // The mod renders preedit and owns confirmed text.
-        case WM_IME_SETCONTEXT: {
-            const DWORD hidden = (s.immListMask & ISC_SHOWUIALLCANDIDATEWINDOW) |
-                                 (s.imm ? ISC_SHOWUICOMPOSITIONWINDOW : 0);
-            return DefWindowProcW(window, message, w, l & ~static_cast<LPARAM>(hidden));
-        }
-        case WM_IME_NOTIFY:
-            return DefWindowProcW(window, message, w, l);
-        }
+        } catch (...) { detach(); }
     }
     return DefSubclassProc(window, message, w, l);
 }

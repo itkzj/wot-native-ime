@@ -1,3 +1,51 @@
+#ifdef TEST_IME_ROUTING
+#include "NativeIme.cpp"
+#include <cassert>
+#include <cstdio>
+
+extern "C" __declspec(dllexport) void testImeRouting() {
+    _set_error_mode(_OUT_TO_STDERR);
+    constexpr LRESULT stock = 71;
+    WNDCLASSW cls{};
+    cls.lpszClassName = L"WotImeRouteTest";
+    cls.lpfnWndProc = [](HWND window, UINT message, WPARAM w, LPARAM l) -> LRESULT {
+        if (message == WM_IME_CHAR || message == WM_KEYDOWN || message == WM_IME_COMPOSITION ||
+            message == WM_IME_NOTIFY || message == WM_IME_SETCONTEXT) return stock;
+        return DefWindowProcW(window, message, w, l);
+    };
+    assert(RegisterClassW(&cls));
+    HWND window = CreateWindowW(cls.lpszClassName, L"", WS_POPUP | WS_VISIBLE,
+                                0, 0, 1, 1, nullptr, nullptr, nullptr, nullptr);
+    SetForegroundWindow(window);
+    SetFocus(window);
+    s.window = window;
+    assert(foreground() && SetWindowSubclass(window, wndProc, SubclassId, 0));
+    s.refresh = [] {
+        // Flash can synchronously dispatch a message before supplying its new snapshot.
+        assert(SendMessageW(s.window, WM_IME_CHAR, 'x', 0) == stock);
+    };
+    for (UINT message : {WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_NOTIFY, WM_KEYDOWN, WM_IME_SETCONTEXT}) {
+        s.token = s.sample.token = 1;
+        s.immListMask = 1;
+        WPARAM w = message == WM_IME_NOTIFY ? IMN_CLOSECANDIDATE : VK_PROCESSKEY;
+        if (message != WM_KEYDOWN && message != WM_IME_SETCONTEXT) {
+            MSG msg{window, message, w, 1, 0, {0, 0}};
+            getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&msg));
+            assert(msg.message == message && msg.wParam == w && msg.lParam == 1);
+        }
+        s.token = s.sample.token = 1;
+        s.immListMask = 1;
+        assert(SendMessageW(window, message, w, 1) == stock);
+    }
+    s.refresh = [] { s.sample.token = 1; };
+    s.token = 1;
+    MSG owned{window, WM_IME_CHAR, 'x', 0, 0, {0, 0}};
+    getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&owned));
+    assert(owned.message == WM_NULL && SendMessageW(window, WM_IME_CHAR, 'x', 0) == 0);
+    DestroyWindow(window);
+    std::puts("Queued and sent IME messages returned to the stock window");
+}
+#else
 #define NOMINMAX
 #include "TextStore.h"
 #include "CandidateList.h"
@@ -169,3 +217,4 @@ int main() {
     CoUninitialize();
     std::puts("TSF document, selection replacement, composition lifecycle and candidate UI passed");
 }
+#endif
