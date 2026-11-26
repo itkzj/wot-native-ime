@@ -18,6 +18,7 @@ package {
             if (!list_mc) return;
             var format:TextFormat = CandidateSkin.format();
             var width:Number = 100;
+            var limit:Number = stage && stage.scaleX > 0 ? stage.stageWidth / stage.scaleX - 8 : Number.POSITIVE_INFINITY;
             var y:Number = 3;
             var selectedY:Number = 0;
             var selectedHeight:Number = 0;
@@ -27,6 +28,7 @@ package {
                 if (!row || !row.visible) continue;
                 var number:TextField = row.ID as TextField;
                 var value:TextField = row.Value as TextField;
+                value.wordWrap = false;
                 for each (var label:TextField in [number, value]) {
                     label.embedFonts = false;
                     label.autoSize = TextFieldAutoSize.LEFT;
@@ -35,6 +37,12 @@ package {
                 }
                 number.x = 8;
                 value.x = number.x + number.width + 2;
+                var available:Number = Math.max(24, limit - value.x - 8);
+                if (value.width > available) {
+                    value.multiline = true;
+                    value.wordWrap = true;
+                    value.width = available;
+                }
                 width = Math.max(width, Math.ceil(value.x + value.width + 8));
                 var h:Number = CandidateSkin.rowHeight(Math.max(value.height, number.height));
                 row.y = y;
@@ -74,7 +82,12 @@ package {
                         var rawMid:Number = (bottom + top) / 2;
                         anchor = stageToList(x / sx, bottom / sy);
                         upper = stageToList(x / sx, top / sy);
-                        // Require the original host anchor to miss the input and its inverse to hit it.
+                        // A long inline composition can extend past a single-line field before it scrolls.
+                        // Accept its clipped x only when the y coordinates independently identify this line.
+                        if ((!field.multiline || field.numLines == 1) && isFinite(anchor.x) &&
+                            (rawMid < bounds.top || rawMid > bounds.bottom)) {
+                            anchor.x = Math.max(bounds.left, Math.min(anchor.x, bounds.right));
+                        }
                         if (!includesCaret(bounds, x, rawMid) && includesCaret(bounds, anchor.x, (anchor.y + upper.y) / 2)) {
                             // WoT's AbstractApplication.as_updateStage(w,h,s) stores round(w/s),
                             // round(h/s) in App and sets both Stage scales to s.
