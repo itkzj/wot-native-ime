@@ -1,14 +1,16 @@
+# -*- coding: utf-8 -*-
 import re
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
 RESOURCE = 'gui/flash/ime.xml'
-UNSUPPORTED = 'GFxIME_NotSupported'
-KEYBOARDS = {'GFxIME_Ch_Simp', 'GFxIME_Ch_Trad'}
-# WoT CN 2.4.1.1: total registrations and registrations with a stock renderer.
-EXPECTED = {'ChineseSimplified': (56, 54), 'ChineseTraditional': (35, 31),
-            'Japanese': (13, 13), 'Korean': (11, 11)}
-TAG = re.compile(r'<Tag>(GFxIME_\w+)</Tag>')
+# Match the registered IME name as well as its renderer: some Wubi entries
+# reuse a Pinyin renderer and even the Pinyin display name in the stock XML.
+PINYIN = {
+    'GFxIME_SogouPinyin': {'Sogou Pinyin', 'Sogou Pinyin IME', 'SOGOUPY.IME', '搜狗拼音输入法', '搜狗输入法'},
+    'GFxIME_Ch_Simp_QQPinyin': {'QQPINYIN.IME', '中文 - QQ拼音输入法'},
+}
+ENTRY = re.compile(r'(<imeName>([^<]+)</imeName>\s*<displayName>[^<]*</displayName>\s*<Tag>)([^<]+)(</Tag>)')
 
 
 def stock_registration(archive):
@@ -17,29 +19,32 @@ def stock_registration(archive):
             raise ValueError('Unexpected Scaleform registration size')
         original = stock.read(RESOURCE)
     root = ElementTree.fromstring(original)
-    languages = root.find('language')
-    if root.tag != 'data' or languages is None or sorted(child.tag for child in languages) != sorted(EXPECTED):
-        raise ValueError('Unexpected Scaleform registration format')
-    keyboards = []
-    for language in languages:
-        tags = language.findall('Tag')
-        if len(tags) != len(language.findall('imeName')):
-            raise ValueError('Missing Scaleform name or tag in ' + language.tag)
-        changed = 0
-        for tag in tags:
-            if tag.text in KEYBOARDS:
-                keyboards.append(tag.text)
-            elif tag.text != UNSUPPORTED:
-                tag.text = UNSUPPORTED
+    sections = root.findall('./language/ChineseSimplified')
+    if len(sections) != 1:
+        raise ValueError('Expected one Simplified Chinese registration section')
+    # Build the expected XML tree independently from the byte-preserving patch.
+    name = None
+    changed = 0
+    for entry in sections[0]:
+        if entry.tag == 'imeName':
+            name = entry.text.encode('utf-8')
+        elif entry.tag == 'Tag':
+            if name in PINYIN.get(entry.text, ()):
+                entry.text = 'GFxIME_NotSupported'
                 changed += 1
-        if (len(tags), changed) != EXPECTED[language.tag]:
-            raise ValueError('Unexpected registration counts for ' + language.tag)
-    if sorted(keyboards) != sorted(KEYBOARDS):
-        raise ValueError('Expected both stock US keyboard registrations')
+            name = None
+    if changed != 8:
+        raise ValueError('Expected eight known Sogou/QQ Pinyin aliases')
 
-    # Keep the client's original encoding, comments, whitespace, names and GUIDs.
-    patched, count = TAG.subn(lambda m: m.group(0) if m.group(1) in KEYBOARDS else '<Tag>' + UNSUPPORTED + '</Tag>', original)
-    if (count != sum(total for total, _ in EXPECTED.values()) or
-            ElementTree.tostring(ElementTree.fromstring(patched)) != ElementTree.tostring(root)):
-        raise ValueError('Rewritten tags do not match parsed registrations')
+    def replace(match):
+        prefix, ime, tag, suffix = match.groups()
+        if ime in PINYIN.get(tag, ()):
+            return prefix + 'GFxIME_NotSupported' + suffix
+        return match.group(0)
+
+    start = original.index('<ChineseSimplified>')
+    end = original.index('</ChineseSimplified>', start)
+    patched = original[:start] + ENTRY.sub(replace, original[start:end]) + original[end:]
+    if ElementTree.tostring(ElementTree.fromstring(patched)) != ElementTree.tostring(root):
+        raise ValueError('Unexpected change outside the supported Pinyin registrations')
     return patched

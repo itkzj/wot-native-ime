@@ -407,11 +407,24 @@ bool attachTsf() {
     return s.associated && SUCCEEDED(s.manager->SetFocus(s.document));
 }
 
-bool legacy(HKL keyboard) {
+enum class InputRoute { Stock, Tsf, Imm };
+
+constexpr InputRoute inputRoute(LANGID language, bool tsf, bool imm) {
+    return PRIMARYLANGID(language) != LANG_CHINESE ? InputRoute::Stock :
+           tsf ? InputRoute::Tsf : imm ? InputRoute::Imm : InputRoute::Stock;
+}
+static_assert(inputRoute(0x0411, true, false) == InputRoute::Stock &&
+              inputRoute(0x0412, false, true) == InputRoute::Stock &&
+              inputRoute(0x0804, true, false) == InputRoute::Tsf &&
+              inputRoute(0x0404, false, true) == InputRoute::Imm &&
+              inputRoute(0x0804, false, false) == InputRoute::Stock);
+
+InputRoute activeRoute(HKL keyboard) {
     TF_INPUTPROCESSORPROFILE active{};
     if (s.profiles && s.profiles->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD, &active) == S_OK &&
-        active.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR) return false;
-    return ImmIsIME(keyboard) != FALSE;
+        active.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR)
+        return inputRoute(active.langid, true, false);
+    return inputRoute(LOWORD(reinterpret_cast<ULONG_PTR>(keyboard)), false, ImmIsIME(keyboard) != FALSE);
 }
 
 void locate() {
@@ -494,13 +507,15 @@ void sync() {
     s.sample.token = 0;
     s.refresh();
     if (!foreground()) { detach(); return; }
+    if (!s.sample.token) { detach(); return; }
     const auto keyboard = GetKeyboardLayout(0);
-    const bool imm = legacy(keyboard);
+    const auto route = activeRoute(keyboard);
+    if (route == InputRoute::Stock) { detach(); s.attachFailed = false; return; }
+    const bool imm = route == InputRoute::Imm;
     const bool draftChangedDuringComposition = s.token && (s.immComposing || (s.store && s.store->composing)) &&
                                                !(s.base == s.sample.draft) && s.token == s.sample.token;
     if (s.token && (s.token != s.sample.token || s.keyboard != keyboard || s.imm != imm ||
                     draftChangedDuringComposition)) detach();
-    if (!s.sample.token) return;
     const bool newField = !s.token;
     if (newField) {
         s.base = s.sample.draft;
