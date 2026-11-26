@@ -183,9 +183,16 @@ package {
             if (viewport.isEmpty()) return null;
             var caret:Rectangle = caretLocal(field.caretIndex);
             if (!caret) return null;
+            if (!field.multiline) {
+                var bounds:Rectangle = field.getBounds(field);
+                if (bounds.isEmpty()) return null;
+                // Some Scaleform builds return content coordinates for a scrolled glyph.
+                if (caret.x >= bounds.right && field.scrollH > 0) caret.x -= field.scrollH;
+                caret.x = Math.max(bounds.left, Math.min(caret.x, bounds.right - caret.width));
+            }
             var a:Point = movie.globalToLocal(field.localToGlobal(caret.topLeft));
             var b:Point = movie.globalToLocal(field.localToGlobal(caret.bottomRight));
-            if (a.x < viewport.left - 1 || a.x > viewport.right + 1 ||
+            if (b.x <= viewport.left || a.x >= viewport.right ||
                 b.y <= viewport.top || a.y >= viewport.bottom) return null;
             a.x = Math.max(a.x, viewport.left);
             a.y = Math.max(a.y, viewport.top);
