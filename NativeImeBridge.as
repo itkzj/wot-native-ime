@@ -14,7 +14,6 @@ package {
     import flash.text.TextField;
     import flash.text.TextFieldAutoSize;
     import flash.text.TextFieldType;
-    import flash.text.TextFormat;
     import flash.text.TextLineMetrics;
     import net.wg.infrastructure.base.AbstractView;
 
@@ -43,6 +42,7 @@ package {
         private var candidateLimit:Number;
         private var candidateWidth:Number;
         private var candidateHeight:Number;
+        private var highlightY:Number, highlightHeight:Number, separatorY:Number;
 
         public function NativeImeBridge() {
             mouseEnabled = false;
@@ -246,13 +246,14 @@ package {
             candidateLabels = labels.concat();
             preeditText = preedit;
             candidateSelection = selection >= 0 && selection < labels.length ? selection : -1;
-            candidateLimit = -1;
+            layoutCandidates(Math.max(24, screen.width - 8));
             positionCandidates(movie, screen, caret);
         }
 
         private function hideCandidates():void {
             if (candidatePanel && candidatePanel.parent) candidatePanel.parent.removeChild(candidatePanel);
             candidatePanel = null;
+            candidateWidth = 0;
             candidateLabels = null;
             preeditText = null;
         }
@@ -277,45 +278,69 @@ package {
         }
 
         private function layoutCandidates(limit:Number):void {
+            var resized:Boolean = candidateLimit != limit;
+            var oldWidth:Number = candidateWidth, oldHeight:Number = candidateHeight;
             candidateLimit = limit;
-            while (candidatePanel.numChildren) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
-            var format:TextFormat = CandidateSkin.format();
-            var preeditFormat:TextFormat = CandidateSkin.format(true);
             candidateWidth = Math.min(100, limit);
             candidateHeight = 3;
-            for (var index:int = preeditText ? -1 : 0; index < candidateLabels.length; ++index) {
-                var text:TextField = new TextField();
-                text.embedFonts = false;
-                text.selectable = false;
-                text.multiline = true;
-                text.autoSize = TextFieldAutoSize.LEFT;
-                text.defaultTextFormat = index < 0 ? preeditFormat : format;
-                text.text = index < 0 ? preeditText : candidateLabels[index];
-                if (index >= 0 && index < 9) text.text = (index + 1) + ". " + text.text;
-                text.x = 8;
-                text.y = candidateHeight;
-                if (text.width > limit - 16) {
-                    text.wordWrap = true;
-                    text.width = limit - 16;
+            var slot:int = 0;
+            for (var index:int = preeditText ? -1 : 0; index < candidateLabels.length; ++index, ++slot) {
+                var text:TextField;
+                if (slot < candidatePanel.numChildren) text = candidatePanel.getChildAt(slot) as TextField;
+                else {
+                    text = new TextField();
+                    text.embedFonts = false;
+                    text.selectable = false;
+                    text.multiline = true;
+                    text.autoSize = TextFieldAutoSize.LEFT;
+                    text.x = 8;
+                    candidatePanel.addChild(text);
                 }
+                var role:String = index < 0 ? "preedit" : "candidate";
+                var reformat:Boolean = text.name != role;
+                if (reformat) {
+                    text.name = role;
+                    text.defaultTextFormat = CandidateSkin.format(index < 0);
+                }
+                var caption:String = index < 0 ? preeditText :
+                    (index < 9 ? (index + 1) + ". " : "") + candidateLabels[index];
+                if (reformat || resized || text.text != caption) {
+                    if (text.wordWrap) text.wordWrap = false;
+                    if (reformat || text.text != caption) text.text = caption;
+                    if (text.width > limit - 16) {
+                        text.wordWrap = true;
+                        text.width = limit - 16;
+                    }
+                }
+                if (text.y != candidateHeight) text.y = candidateHeight;
                 candidateWidth = Math.max(candidateWidth, Math.ceil(text.width) + 16);
                 candidateHeight += CandidateSkin.rowHeight(text.height);
-                candidatePanel.addChild(text);
             }
+            while (candidatePanel.numChildren > slot) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
             candidateHeight += 3;
-            paintCandidates();
+            paintCandidates(oldWidth, oldHeight);
         }
 
-        private function paintCandidates():void {
+        private function paintCandidates(oldWidth:Number, oldHeight:Number):void {
             var graphics:Graphics = candidatePanel.graphics;
             var selected:TextField = candidateSelection < 0 ? null :
                 candidatePanel.getChildAt(candidateSelection + (preeditText ? 1 : 0)) as TextField;
-            CandidateSkin.paint(graphics, candidateWidth, candidateHeight, selected ? selected.y : 0,
-                                selected ? CandidateSkin.rowHeight(selected.height) : 0);
+            var y:Number = selected ? selected.y : 0;
+            var h:Number = selected ? CandidateSkin.rowHeight(selected.height) : 0;
+            var divider:Number = 0;
             if (preeditText && candidateLabels.length) {
                 var header:TextField = candidatePanel.getChildAt(0) as TextField;
+                divider = header.y + CandidateSkin.rowHeight(header.height) - 1;
+            }
+            if (oldWidth == candidateWidth && oldHeight == candidateHeight &&
+                highlightY == y && highlightHeight == h && separatorY == divider) return;
+            highlightY = y;
+            highlightHeight = h;
+            separatorY = divider;
+            CandidateSkin.paint(graphics, candidateWidth, candidateHeight, y, h);
+            if (divider) {
                 graphics.beginFill(0x66614B);
-                graphics.drawRect(6, header.y + CandidateSkin.rowHeight(header.height) - 1, candidateWidth - 12, 1);
+                graphics.drawRect(6, divider, candidateWidth - 12, 1);
                 graphics.endFill();
             }
         }

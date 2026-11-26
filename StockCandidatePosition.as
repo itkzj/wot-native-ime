@@ -12,30 +12,34 @@ package {
     // Scaleform supplies SendIMEMessage on the loaded movie instance.
     public dynamic class StockCandidatePosition extends MainTimeline {
         private var reportedCorrection:Boolean;
+        private const rowFormat:TextFormat = CandidateSkin.format();
 
         override public function DisplayCallback(selected:Number):* {
-            super.DisplayCallback(selected);
+            // SetList has already filled the rows and applied the selection. This callback owns layout.
             if (!list_mc) return;
-            var format:TextFormat = CandidateSkin.format();
             var width:Number = 100;
             var limit:Number = stage && stage.scaleX > 0 ? stage.stageWidth / stage.scaleX - 8 : Number.POSITIVE_INFINITY;
             var y:Number = 3;
             var selectedY:Number = 0;
             var selectedHeight:Number = 0;
-            var rows:Array = [];
+            var rows:Array = list_mc.skinRows || (list_mc.skinRows = []);
             for (var i:int = 0; i < list_mc.numChildren; ++i) {
                 var row:MovieClip = list_mc.getChildByName("Character" + i) as MovieClip;
                 if (!row || !row.visible) continue;
                 var number:TextField = row.ID as TextField;
                 var value:TextField = row.Value as TextField;
-                value.wordWrap = false;
-                for each (var label:TextField in [number, value]) {
-                    label.embedFonts = false;
-                    label.autoSize = TextFieldAutoSize.LEFT;
-                    label.defaultTextFormat = format;
-                    label.setTextFormat(format);
+                if (rows[i] !== row) {
+                    rows[i] = row;
+                    value.embedFonts = number.embedFonts = false;
+                    value.autoSize = number.autoSize = TextFieldAutoSize.LEFT;
+                    value.defaultTextFormat = number.defaultTextFormat = rowFormat;
+                    number.x = 8;
                 }
-                number.x = 8;
+                // The stock selection handler reapplies its own text format before SetList calls us.
+                number.setTextFormat(rowFormat);
+                value.setTextFormat(rowFormat);
+                number.alpha = value.text.length ? 1 : 0.25;
+                if (value.wordWrap) value.wordWrap = false;
                 value.x = number.x + number.width + 2;
                 var available:Number = Math.max(24, limit - value.x - 8);
                 if (value.width > available) {
@@ -50,13 +54,22 @@ package {
                 if (i == selected) { selectedY = y; selectedHeight = h; }
                 // Keep the original row, click surface and controller; paint behind them.
                 row.bkGround_mc.alpha = row.RowNumberBackground_mc.alpha = 0;
-                row.bkGround_mc.height = h;
-                rows.push(row);
+                if (row.bkGround_mc.height != h) row.bkGround_mc.height = h;
                 y += h;
             }
-            for each (row in rows) row.bkGround_mc.width = width;
-            candListHeight = rows.length ? y + 3 : 0;
-            CandidateSkin.paint(list_mc.graphics, width, candListHeight, selectedY, selectedHeight);
+            for each (row in rows) {
+                if (row && row.visible && row.bkGround_mc.width != width) row.bkGround_mc.width = width;
+            }
+            candListHeight = y > 3 ? y + 3 : 0;
+            if (list_mc.skinWidth !== width || list_mc.skinHeight !== candListHeight ||
+                list_mc.skinY !== selectedY || list_mc.skinHighlight !== selectedHeight) {
+                CandidateSkin.paint(list_mc.graphics, width, candListHeight, selectedY, selectedHeight);
+                list_mc.skinWidth = width;
+                list_mc.skinHeight = candListHeight;
+                list_mc.skinY = selectedY;
+                list_mc.skinHighlight = selectedHeight;
+            }
+            isCandListOpen = true;
         }
 
         override public function RepositionWindow(x:Number, bottom:Number, readingHeight:Number,

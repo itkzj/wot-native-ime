@@ -5,6 +5,7 @@ package IME_fla {
     public dynamic class MainTimeline extends MovieClip {
         public var list_mc:MovieClip;
         public var candListHeight:Number;
+        public var isCandListOpen:Boolean;
         public function DisplayCallback(selected:Number):* { return undefined; }
         public function RepositionWindow(x:Number, bottom:Number, readingHeight:Number,
                                          top:Number, width:Number, height:Number):Boolean {
