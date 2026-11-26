@@ -15,6 +15,7 @@ def verify(stock, patched):
     assert before[index + 1:] == after[index + 2:]
     kind, abc, _ = after[index]
     assert kind == 82 and b'StockCandidatePosition' in abc and b'RepositionWindow' in abc
+    assert b'DisplayCallback' in abc and b'CandidateSkin' in abc and b'Microsoft YaHei' in abc
     assert b'[WotNativeIme] stock candidate position corrected' in abc
     assert after[index + 1][:2] == (76, before[index][1].replace(OLD_ROOT, NEW_ROOT))
 

@@ -1,5 +1,8 @@
 package {
     import IME_fla.MainTimeline;
+    import flash.display.MovieClip;
+    import flash.text.TextFieldAutoSize;
+    import flash.text.TextFormat;
     import flash.geom.Point;
     import flash.geom.Rectangle;
     import flash.system.ApplicationDomain;
@@ -9,6 +12,44 @@ package {
     // Scaleform supplies SendIMEMessage on the loaded movie instance.
     public dynamic class StockCandidatePosition extends MainTimeline {
         private var reportedCorrection:Boolean;
+
+        override public function DisplayCallback(selected:Number):* {
+            super.DisplayCallback(selected);
+            if (!list_mc) return;
+            var format:TextFormat = CandidateSkin.format();
+            var width:Number = 100;
+            var y:Number = 3;
+            var selectedY:Number = 0;
+            var selectedHeight:Number = 0;
+            var rows:Array = [];
+            for (var i:int = 0; i < list_mc.numChildren; ++i) {
+                var row:MovieClip = list_mc.getChildByName("Character" + i) as MovieClip;
+                if (!row || !row.visible) continue;
+                var number:TextField = row.ID as TextField;
+                var value:TextField = row.Value as TextField;
+                for each (var label:TextField in [number, value]) {
+                    label.embedFonts = false;
+                    label.autoSize = TextFieldAutoSize.LEFT;
+                    label.defaultTextFormat = format;
+                    label.setTextFormat(format);
+                }
+                number.x = 8;
+                value.x = number.x + number.width + 2;
+                width = Math.max(width, Math.ceil(value.x + value.width + 8));
+                var h:Number = CandidateSkin.rowHeight(Math.max(value.height, number.height));
+                row.y = y;
+                number.y = value.y = Math.floor((h - value.height) / 2);
+                if (i == selected) { selectedY = y; selectedHeight = h; }
+                // Keep the original row, click surface and controller; paint behind them.
+                row.bkGround_mc.alpha = row.RowNumberBackground_mc.alpha = 0;
+                row.bkGround_mc.height = h;
+                rows.push(row);
+                y += h;
+            }
+            for each (row in rows) row.bkGround_mc.width = width;
+            candListHeight = rows.length ? y + 3 : 0;
+            CandidateSkin.paint(list_mc.graphics, width, candListHeight, selectedY, selectedHeight);
+        }
 
         override public function RepositionWindow(x:Number, bottom:Number, readingHeight:Number,
                                                   top:Number, width:Number, height:Number):Boolean {

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Bind a positioning-only subclass to the original 2.4.2.0 AS3 candidate movie."""
+"""Bind the styled, scale-aware candidate root to the original 2.4.2.0 movie."""
 from __future__ import print_function
 import hashlib
 import io

@@ -1,7 +1,6 @@
 package {
     import flash.display.DisplayObject;
     import flash.display.DisplayObjectContainer;
-    import flash.display.GradientType;
     import flash.display.Graphics;
     import flash.display.Loader;
     import flash.display.MovieClip;
@@ -9,7 +8,6 @@ package {
     import flash.display.Stage;
     import flash.events.Event;
     import flash.events.FocusEvent;
-    import flash.geom.Matrix;
     import flash.geom.Point;
     import flash.geom.Rectangle;
     import flash.system.ApplicationDomain;
@@ -281,8 +279,8 @@ package {
         private function layoutCandidates(limit:Number):void {
             candidateLimit = limit;
             while (candidatePanel.numChildren) candidatePanel.removeChildAt(candidatePanel.numChildren - 1);
-            var format:TextFormat = new TextFormat("Microsoft YaHei", 14, 0xDCD8CB);
-            var preeditFormat:TextFormat = new TextFormat("Microsoft YaHei", 14, 0xF1E7C8, true);
+            var format:TextFormat = CandidateSkin.format();
+            var preeditFormat:TextFormat = CandidateSkin.format(true);
             candidateWidth = Math.min(100, limit);
             candidateHeight = 3;
             for (var index:int = preeditText ? -1 : 0; index < candidateLabels.length; ++index) {
@@ -301,43 +299,25 @@ package {
                     text.width = limit - 16;
                 }
                 candidateWidth = Math.max(candidateWidth, Math.ceil(text.width) + 16);
-                candidateHeight += rowHeight(text);
+                candidateHeight += CandidateSkin.rowHeight(text.height);
                 candidatePanel.addChild(text);
             }
             candidateHeight += 3;
             paintCandidates();
         }
 
-        private function rowHeight(text:TextField):Number {
-            return Math.max(22, Math.ceil(text.height));
-        }
-
         private function paintCandidates():void {
             var graphics:Graphics = candidatePanel.graphics;
-            graphics.clear();
-            var fill:Matrix = new Matrix();
-            fill.createGradientBox(candidateWidth, candidateHeight, Math.PI / 2);
-            graphics.beginGradientFill(GradientType.LINEAR, [0x414032, 0x23231D, 0x1B1B17],
-                [1, 1, 1], [0, 86, 255], fill);
-            graphics.drawRect(0, 0, candidateWidth, candidateHeight);
-            graphics.endFill();
+            var selected:TextField = candidateSelection < 0 ? null :
+                candidatePanel.getChildAt(candidateSelection + (preeditText ? 1 : 0)) as TextField;
+            CandidateSkin.paint(graphics, candidateWidth, candidateHeight, selected ? selected.y : 0,
+                                selected ? CandidateSkin.rowHeight(selected.height) : 0);
             if (preeditText && candidateLabels.length) {
                 var header:TextField = candidatePanel.getChildAt(0) as TextField;
                 graphics.beginFill(0x66614B);
-                graphics.drawRect(6, header.y + rowHeight(header) - 1, candidateWidth - 12, 1);
+                graphics.drawRect(6, header.y + CandidateSkin.rowHeight(header.height) - 1, candidateWidth - 12, 1);
                 graphics.endFill();
             }
-            if (candidateSelection >= 0) {
-                var text:TextField = candidatePanel.getChildAt(candidateSelection + (preeditText ? 1 : 0)) as TextField;
-                graphics.beginFill(0x54513E);
-                graphics.drawRect(1, text.y, candidateWidth - 2, rowHeight(text));
-                graphics.endFill();
-                graphics.beginFill(0xA69A69);
-                graphics.drawRect(1, text.y, 2, rowHeight(text));
-                graphics.endFill();
-            }
-            graphics.lineStyle(1, 0x6E6952);
-            graphics.drawRect(0.5, 0.5, candidateWidth - 1, candidateHeight - 1);
         }
 
         private function splitPair(value:String, index:int):Boolean {

@@ -4,6 +4,8 @@ package IME_fla {
     // Compile-time signature of the client's res/gui/flash/ime.swf. Never embed this stub.
     public dynamic class MainTimeline extends MovieClip {
         public var list_mc:MovieClip;
+        public var candListHeight:Number;
+        public function DisplayCallback(selected:Number):* { return undefined; }
         public function RepositionWindow(x:Number, bottom:Number, readingHeight:Number,
                                          top:Number, width:Number, height:Number):Boolean {
             return false;
