@@ -35,11 +35,12 @@ for name in ('mod_wot_native_ime', 'wot_native_ime_paths'):
     output = 'build/' + name + '.pyc'
     py_compile.compile(name + '.py', output, name + '.py', doraise=True)
     scripts.append(('res/scripts/client/gui/mods/' + name + '.pyc', read(output)))
+loose_movie = 'res_mods/' + ROOT.split('/', 1)[1] + 'gui/flash/ime.swf'
 files = [wotmod('wot.native.ime', 'WoT Native IME', [
-    ('res/gui/flash/ime.swf', read('build/ime.swf')),
     ('res/gui/flash/NativeImeBridge.swf', read('build/NativeImeBridge.swf')),
     ('LICENSE', read('LICENSE')),
-] + scripts), (ROOT + '_wot_native_ime.pyd', read('build/_wot_native_ime.pyd'))]
+] + scripts), (ROOT + '_wot_native_ime.pyd', read('build/_wot_native_ime.pyd')),
+    (loose_movie, read('build/ime.swf'))]
 output = 'dist/WotNativeIme_V%s.zip' % VERSION
 with ZipFile(output, 'w', ZIP_DEFLATED) as release:
     for path, data in files:

@@ -6,7 +6,8 @@ package {
     import flash.text.TextField;
     import flash.text.TextFieldType;
 
-    public class StockCandidatePosition extends MainTimeline {
+    // Scaleform supplies SendIMEMessage on the loaded movie instance.
+    public dynamic class StockCandidatePosition extends MainTimeline {
         private var reportedCorrection:Boolean;
 
         override public function RepositionWindow(x:Number, bottom:Number, readingHeight:Number,
