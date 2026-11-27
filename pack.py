@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 from wot_native_ime_paths import mods_mount
 
-VERSION = '1.0.8-beta'
+VERSION = '1.0.8'
 
 
 def write_archive(destination, entries, compression):

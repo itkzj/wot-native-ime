@@ -417,7 +417,7 @@ def init():
         for name, original, hook in _focus_hooks:
             setattr(BattleMessengerView, name, hook)
         _enabled = True
-        print('[WotNativeIme] V1.0.8-beta mod loaded')
+        print('[WotNativeIme] V1.0.8 mod loaded')
     except Exception:
         _error('Could not register native IME')
 

@@ -1,4 +1,4 @@
-# 坦克世界国服输入法修复 · 1.0.8-beta
+# 坦克世界国服输入法修复 · 1.0.8
 
 适用于国服 2.4.2.0 x64。游戏语言栏能识别当前输入法时，使用原版候选、键盘选词和提交。语言栏明确显示 `Not Supported` 时，模组才在支持的中文聊天或搜索框中接入 Windows TSF / IMM，在光标旁显示候选。语言栏还在加载、无法读取或当前字段不受支持时，由游戏处理输入。
 
@@ -8,8 +8,8 @@
 
 ## 安装和回退
 
-1. 退出游戏，把先前安装的 `wot.native.ime_*.wotmod`、`wot.native.ime.stock-filter_*.wotmod` 和 `_wot_native_ime.pyd` 一起移出 `mods/2.4.2.0/`，留作备份。上一个测试包也叫 `1.0.8-beta`，升级时需要同时替换主模组和原生模块。
-2. 若 `res_mods/2.4.2.0/gui/flash/ime.swf` 来自其他模组，先备份。将新 ZIP 解压到游戏根目录，覆盖同名的旧诊断文件。`mods/2.4.2.0/` 下应有 `wot.native.ime_1.0.8-beta.wotmod` 和 `_wot_native_ime.pyd`，`res_mods/2.4.2.0/gui/flash/` 下应有 `ime.swf`。游戏继续使用自己的输入法登记表。
+1. 退出游戏，把先前安装的 `wot.native.ime_*.wotmod`、`wot.native.ime.stock-filter_*.wotmod` 和 `_wot_native_ime.pyd` 一起移出 `mods/2.4.2.0/`，留作备份。从测试版升级时也要移出旧 `.wotmod`，以免游戏同时加载两个版本。
+2. 若 `res_mods/2.4.2.0/gui/flash/ime.swf` 来自其他模组，先备份。将新 ZIP 解压到游戏根目录。`mods/2.4.2.0/` 下应有 `wot.native.ime_1.0.8.wotmod` 和 `_wot_native_ime.pyd`，`res_mods/2.4.2.0/gui/flash/` 下应有 `ime.swf`。游戏继续使用自己的输入法登记表。
 3. 回退时退出游戏，移出上述三个文件，再放回之前的备份。
 
 ## 实机检查
