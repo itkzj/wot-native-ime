@@ -26,9 +26,11 @@ static BOOL WINAPI testIsIme(HKL) { return TRUE; }
 int main() {
     _set_error_mode(_OUT_TO_STDERR);
     constexpr LRESULT stock = 71;
+    static LPARAM hostImeFlags;
     WNDCLASSW cls{};
     cls.lpszClassName = L"WotImeRouteTest";
     cls.lpfnWndProc = [](HWND window, UINT message, WPARAM w, LPARAM l) -> LRESULT {
+        if (message == WM_IME_NOTIFY || message == WM_IME_SETCONTEXT) hostImeFlags = l;
         if (message == WM_IME_CHAR || message == WM_KEYDOWN || message == WM_KEYUP || message == WM_IME_COMPOSITION ||
             message == WM_IME_NOTIFY || message == WM_IME_SETCONTEXT) return stock;
         return DefWindowProcW(window, message, w, l);
@@ -171,6 +173,17 @@ int main() {
     }
     s.refresh = [] { s.sample.token = 1; };
     s.token = 1;
+    // Even while editing, the host needs the real context and input-mode changes.
+    for (const WPARAM change : {IMN_SETOPENSTATUS, IMN_SETCONVERSIONMODE})
+        assert(SendMessageW(window, WM_IME_NOTIFY, change, 0) == stock);
+    s.imm = true;
+    assert(SendMessageW(window, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL) == stock);
+    assert(static_cast<DWORD>(hostImeFlags) == (ISC_SHOWUIALL & ~ISC_SHOWUICOMPOSITIONWINDOW));
+    s.immListMask = 1;
+    assert(SendMessageW(window, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 1) == 0);
+    s.immListMask = 1;
+    assert(SendMessageW(window, WM_IME_NOTIFY, IMN_CLOSECANDIDATE, 3) == stock && hostImeFlags == 2);
+    s.imm = false;
     MSG owned{window, WM_IME_CHAR, 'x', 0, 0, {0, 0}};
     getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&owned));
     assert(owned.message == WM_NULL && SendMessageW(window, WM_IME_CHAR, 'x', 0) == 0);

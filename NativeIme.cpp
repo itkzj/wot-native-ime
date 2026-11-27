@@ -845,13 +845,16 @@ LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR
                 case WM_IME_SETCONTEXT: {
                     const DWORD hidden = (s.immListMask & ISC_SHOWUIALLCANDIDATEWINDOW) |
                                          (s.imm ? ISC_SHOWUICOMPOSITIONWINDOW : 0);
-                    return DefWindowProcW(window, message, w, l & ~static_cast<LPARAM>(hidden));
+                    l &= ~static_cast<LPARAM>(hidden);
+                    break;
                 }
                 case WM_IME_NOTIFY: {
                     const DWORD mask = filterCandidateNotification(w, static_cast<DWORD>(l));
-                    if (mask != static_cast<DWORD>(l))
-                        return mask ? DefWindowProcW(window, message, w, mask) : 0;
-                    return DefWindowProcW(window, message, w, l);
+                    if (mask != static_cast<DWORD>(l)) {
+                        if (!mask) return 0;
+                        l = mask;
+                    }
+                    break; // Deliver input-mode changes and remaining lists to the host.
                 }
                 default: return 0; // VK_PROCESSKEY or WM_IME_CHAR; TSF and GCS_RESULTSTR own text.
                 }
