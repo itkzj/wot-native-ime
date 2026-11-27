@@ -26,6 +26,9 @@ class Native(object):
     def ImeSnapshot(self, token, *args):
         self.token = token
 
+    def ImeGameplay(self):
+        self.token = 'gameplay'
+
     def ImeClear(self):
         self.token = 0
 
@@ -66,4 +69,27 @@ refresh()
 candidates(view, page)
 candidates(view, page)
 assert view.pages == [(1, page), (0, state['_EMPTY_CANDIDATES']), (2, page), (3, page)]
-print('Stock handoff, stale result rejection and candidate generations passed')
+class BattleChat(object):
+    opened = False
+
+    def isFocused(self):
+        return self.opened
+
+
+chat = BattleChat()
+state.update(_battle_owner=chat, _battle=view)
+refresh()  # Includes a stale Flash snapshot on the first frame after chat closes.
+assert native.token == 'gameplay' and state['_binding'] is None
+chat.opened = True
+refresh()
+assert native.token and native.token != 'gameplay' and commit(native.token, *edit)
+view.generation = 0
+refresh()  # Open chat that is being handled by the stock input method.
+assert native.token == 0
+chat.opened = False
+refresh()
+assert native.token == 'gameplay'
+state['_battle_owner'] = None
+refresh()
+assert native.token == 0
+print('Stock handoff, battle chat open/closed routing and candidate generations passed')

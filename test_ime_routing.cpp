@@ -56,12 +56,28 @@ int main() {
     assert(SUCCEEDED(s.manager->CreateDocumentMgr(&gameplay)));
     assert(SUCCEEDED(s.manager->AssociateFocus(window, windowDoc, &prior)));
     assert(SUCCEEDED(s.manager->SetFocus(gameplay)));
+    assert(focusDocument(nullptr));
+    ITfCompartmentMgr* compartments = nullptr;
+    assert(SUCCEEDED(s.context->QueryInterface(IID_PPV_ARGS(&compartments))));
+    for (const GUID* id : {&GUID_COMPARTMENT_KEYBOARD_DISABLED, &GUID_COMPARTMENT_EMPTYCONTEXT}) {
+        ITfCompartment* value = nullptr;
+        VARIANT flag{};
+        assert(SUCCEEDED(compartments->GetCompartment(*id, &value)));
+        assert(value->GetValue(&flag) == S_OK && flag.vt == VT_I4 && flag.lVal == 1);
+        value->Release();
+    }
+    compartments->Release();
+    ITfDocumentMgr* restored = nullptr;
+    assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == s.document);
+    release(restored);
+    detach();
+    assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == gameplay);
+    release(restored);
     s.token = 1;
     assert(attachTsf());
     // First W after chat closes runs through the production refresh/detach path.
     MSG move{window, WM_KEYDOWN, 'W', 1, 0, {0, 0}};
     handleKey(move);
-    ITfDocumentMgr* restored = nullptr;
     assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == gameplay);
     release(restored);
     assert(move.message == WM_KEYDOWN && move.wParam == 'W' && !s.token);

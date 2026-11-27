@@ -59,6 +59,10 @@ def _refresh():
     try:
         view = _active()
         obj = view.flashObject if _enabled and view is not None else None
+        if obj and _battle_owner is not None and not _battle_owner.isFocused():
+            _binding = None
+            _library.ImeGameplay()
+            return
         snapshot = obj.as_snapshot() if obj else None
         if snapshot is not None:
             if len(snapshot) != 13:

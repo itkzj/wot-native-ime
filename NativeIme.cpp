@@ -21,6 +21,7 @@ constexpr UINT_PTR SubclassId = 1;
 constexpr unsigned ImeKeyCount = 256;
 
 struct Snapshot {
+    bool gameplay = false;
     unsigned token = 0;
     Draft draft;
     std::array<int, 8> rects{};
@@ -400,7 +401,7 @@ bool foreground() { return s.window && gameWindow() == s.window; }
 void clearImmCandidates();
 
 void detach() {
-    if (!s.token && !s.store) return;
+    if (!s.token && !s.store && !s.document) return;
     s.token = 0;
     s.pendingImm = {};
     if (s.hiddenCandidate) {
@@ -444,18 +445,46 @@ void detach() {
 
 void locate();
 
+bool focusDocument(IUnknown* owner) {
+    TfEditCookie cookie;
+    if (FAILED(s.manager->CreateDocumentMgr(&s.document)) ||
+        FAILED(s.document->CreateContext(s.client, 0, owner, &s.context, &cookie))) return false;
+    if (!owner) {
+        ITfCompartmentMgr* compartments = nullptr;
+        if (FAILED(s.context->QueryInterface(IID_PPV_ARGS(&compartments)))) return false;
+        VARIANT disabled{};
+        disabled.vt = VT_I4;
+        disabled.lVal = 1;
+        bool ok = true;
+        for (const GUID* id : {&GUID_COMPARTMENT_KEYBOARD_DISABLED, &GUID_COMPARTMENT_EMPTYCONTEXT}) {
+            ITfCompartment* compartment = nullptr;
+            ok = SUCCEEDED(compartments->GetCompartment(*id, &compartment)) &&
+                 SUCCEEDED(compartment->SetValue(s.client, &disabled));
+            release(compartment);
+            if (!ok) break;
+        }
+        release(compartments);
+        if (!ok) return false;
+    }
+    if (FAILED(s.document->Push(s.context))) return false;
+    // Window focus is already managed by the game. Borrow only TSF keyboard
+    // focus while this field is active; the HWND association can be different.
+    return SUCCEEDED(s.manager->GetFocus(&s.previous)) && SUCCEEDED(s.manager->SetFocus(s.document));
+}
+
 bool attachTsf() {
     if (!s.manager) return false;
     s.store = new (std::nothrow) TextStore(s.window, s.base);
     if (!s.store) return false;
     locate();
-    TfEditCookie cookie;
-    if (FAILED(s.manager->CreateDocumentMgr(&s.document)) ||
-        FAILED(s.document->CreateContext(s.client, 0, static_cast<ITextStoreACP*>(s.store), &s.context, &cookie)) ||
-        FAILED(s.document->Push(s.context))) return false;
-    // Window focus is already managed by the game. Borrow only TSF keyboard
-    // focus while this field is active; the HWND association can be different.
-    return SUCCEEDED(s.manager->GetFocus(&s.previous)) && SUCCEEDED(s.manager->SetFocus(s.document));
+    return focusDocument(static_cast<ITextStoreACP*>(s.store));
+}
+
+bool microsoftPinyin() {
+    constexpr GUID pinyin = {0xfa550b04, 0x5ad7, 0x411f, {0xa5, 0xac, 0xca, 0x03, 0x8e, 0xc5, 0x15, 0xd7}};
+    TF_INPUTPROCESSORPROFILE profile{};
+    return s.profiles && s.profiles->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD, &profile) == S_OK &&
+           profile.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR && profile.guidProfile == pinyin;
 }
 
 enum class InputRoute { Stock, Tsf, Imm };
@@ -555,6 +584,7 @@ void flushTsf() {
 }
 
 bool refreshSnapshot() {
+    s.sample.gameplay = false;
     s.sample.token = 0;
     if (foreground()) s.refresh();
     return s.sample.token && foreground();
@@ -590,8 +620,16 @@ void syncAttachment() {
 }
 
 void sync() {
-    if (refreshSnapshot()) syncAttachment();
-    else detach();
+    const bool editing = refreshSnapshot();
+    const bool gameplay = !editing && s.sample.gameplay && foreground() && s.manager && microsoftPinyin();
+    if (gameplay) {
+        if (s.token || s.store) detach();
+        if (!s.document && !focusDocument(nullptr)) detach();
+    } else {
+        if (!s.token && s.document) detach();
+        if (editing) syncAttachment();
+        else detach();
+    }
 }
 
 void handleKey(MSG& msg) {
@@ -1035,6 +1073,12 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
 
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
 
+PyObject* gameplayPython(PyObject*, PyObject*) {
+    s.sample.token = 0;
+    s.sample.gameplay = true;
+    Py_RETURN_NONE;
+}
+
 PyObject* clearPython(PyObject*, PyObject*) {
     s.sample.token = 0;
     Py_RETURN_NONE;
@@ -1061,6 +1105,7 @@ PyMethodDef methods[] = {
     {"ImeTick", tickPython, METH_NOARGS, nullptr},
     {"ImeCandidates", candidatesPython, METH_NOARGS, nullptr},
     {"ImeStatus", statusPython, METH_NOARGS, nullptr},
+    {"ImeGameplay", gameplayPython, METH_NOARGS, nullptr},
     {"ImeClear", clearPython, METH_NOARGS, nullptr},
     {"ImeSnapshot", snapshotPython, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
