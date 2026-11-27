@@ -74,7 +74,7 @@ package {
 
         override public function RepositionWindow(x:Number, bottom:Number, readingHeight:Number,
                                                   top:Number, width:Number, height:Number):Boolean {
-            if (!stage || !list_mc || (stage.scaleX == 1 && stage.scaleY == 1))
+            if (!stage || !list_mc)
                 return super.RepositionWindow(x, bottom, readingHeight, top, width, height);
 
             var anchor:Point;
@@ -92,6 +92,30 @@ package {
                     }
                     if (field && field.stage === stage && field.type == TextFieldType.INPUT) {
                         var bounds:Rectangle = field.getBounds(this);
+                        // The battle HUD can move the input independently of the host's IME rectangle.
+                        // Use the displayed input row for y, keeping the composition's own caret x.
+                        if ((!field.multiline || field.numLines == 1) && bounds.width > 0 && bounds.height > 0) {
+                            for (var owner:Object = field.parent; owner; owner = owner.parent) {
+                                if (!("messageInputField" in owner) || owner.messageInputField !== field) continue;
+                                var screenStart:Point = stageToList(0, 0);
+                                var screenEnd:Point = stageToList(stage.stageWidth / sx, stage.stageHeight / sy);
+                                var hostMid:Number = (bottom + top) / 2;
+                                var scaled:Point = stageToList(x / sx, hostMid / sy);
+                                var caretX:Number = x;
+                                if (caretX < bounds.left || caretX > bounds.right ||
+                                    (!includesCaret(bounds, x, hostMid) && includesCaret(bounds, scaled.x, scaled.y)))
+                                    caretX = scaled.x;
+                                caretX = Math.max(bounds.left, Math.min(caretX, bounds.right));
+                                if (screenEnd.x > screenStart.x && screenEnd.y > screenStart.y && isFinite(caretX)) {
+                                    var panelWidth:Number = Number(list_mc.skinWidth);
+                                    if (panelWidth > 0) caretX = Math.max(screenStart.x, Math.min(caretX, screenEnd.x - panelWidth));
+                                    return super.RepositionWindow(caretX, bounds.bottom, readingHeight, bounds.top,
+                                                                  screenEnd.x, screenEnd.y);
+                                }
+                                break;
+                            }
+                        }
+                        if (sx == 1 && sy == 1) return super.RepositionWindow(x, bottom, readingHeight, top, width, height);
                         var rawMid:Number = (bottom + top) / 2;
                         anchor = stageToList(x / sx, bottom / sy);
                         upper = stageToList(x / sx, top / sy);
