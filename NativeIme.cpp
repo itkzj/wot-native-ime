@@ -43,6 +43,7 @@ struct State {
     DWORD thread = 0;
     HWND window = nullptr;
     bool gameplayActive = false;
+    bool restoredGameplayKey = false;
     HIMC previousImm = nullptr;
     HHOOK hook = nullptr;
     Refresh refresh = nullptr;
@@ -631,6 +632,7 @@ void sync() {
         if (s.manager && !focusDocument(nullptr)) detach();
         s.previousImm = previous;
         s.gameplayActive = true;
+        s.restoredGameplayKey = false;
         s.swallowed.fill(false);
         return;
     }
@@ -649,7 +651,20 @@ void handleKey(MSG& msg) {
     // Check chat focus before consulting the IME or consuming a paired key-up.
     flushTsf();
     sync();
-    if (s.gameplayActive) return;
+    if (s.gameplayActive) {
+        // An IME can already have replaced the VK by the time we see the MSG.
+        // Recover it on the existing message; its repeat and release flags survive.
+        if (msg.wParam == VK_PROCESSKEY) {
+            UINT scan = (static_cast<DWORD>(msg.lParam) >> 16) & 0xff;
+            if (scan && (msg.lParam & (1L << 24))) scan |= 0xe000;
+            const UINT key = scan ? MapVirtualKeyW(scan, MAPVK_VSC_TO_VK) : 0;
+            if (key && key != VK_PROCESSKEY) {
+                msg.wParam = key;
+                s.restoredGameplayKey = true;
+            }
+        }
+        return;
+    }
     const auto originalKey = msg.wParam;
     const auto key = originalKey == VK_PROCESSKEY ? ImmGetVirtualKey(s.window) : originalKey;
     const bool tracked = key < ImeKeyCount;
@@ -966,6 +981,7 @@ void ImeTick() {
 
 int WINAPI ImeStatus() {
     if (!s.hook || !s.window) return 0;
+    if (s.gameplayActive) return s.restoredGameplayKey ? 6 : 5;
     if (s.token) return s.imm ? 3 : 2;
     return s.attachFailed && s.sample.token ? 4 : 1;
 }

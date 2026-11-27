@@ -29,7 +29,8 @@ _token = 0
 _enabled = _listening = False
 _status = None
 _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attached',
-                  3: 'IMM attached', 4: 'TSF association failed'}
+                  3: 'IMM attached', 4: 'TSF association failed',
+                  5: 'battle gameplay active', 6: 'battle gameplay restored process key'}
 _errors = set()
 _candidate_display = None
 _EMPTY_CANDIDATES = (-1, [], u'')

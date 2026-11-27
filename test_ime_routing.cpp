@@ -86,7 +86,24 @@ int main() {
             assert(event.message == message && event.wParam == key && event.lParam == 1);
         }
     }
-    assert(s.document == disabledDocument && !ImmContext(window).handle);
+    assert(ImeStatus() == 5);
+    MSG unknownScan{window, WM_KEYDOWN, VK_PROCESSKEY, 1, 0, {0, 0}};
+    handleKey(unknownScan);
+    assert(unknownScan.wParam == VK_PROCESSKEY && ImeStatus() == 5);
+    // Replay the battle trace: the physical scan code survives, but Windows
+    // gives the application VK_PROCESSKEY while Chinese input is active.
+    for (const wchar_t key : std::wstring(L"WASD")) {
+        const UINT scan = MapVirtualKeyW(key, MAPVK_VK_TO_VSC);
+        assert(scan);
+        for (UINT message : {WM_KEYDOWN, WM_KEYUP}) {
+            const LPARAM flags = 1 | (scan << 16) | (message == WM_KEYUP ? 0xc0000000u : 0u);
+            MSG event{window, message, VK_PROCESSKEY, flags, 0, {0, 0}};
+            getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&event));
+            assert(event.message == message && event.wParam == key && event.lParam == flags);
+            assert(DispatchMessageW(&event) == stock);
+        }
+    }
+    assert(ImeStatus() == 6 && s.document == disabledDocument && !ImmContext(window).handle);
     s.refresh = [] {}; // Chat reopens with a stock-supported input method.
     sync();
     assert(!s.gameplayActive && ImmContext(window).handle == chatContext);
