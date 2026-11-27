@@ -42,6 +42,8 @@ struct CandidatePage {
 struct State {
     DWORD thread = 0;
     HWND window = nullptr;
+    bool gameplayActive = false;
+    HIMC previousImm = nullptr;
     HHOOK hook = nullptr;
     Refresh refresh = nullptr;
     Commit commit = nullptr;
@@ -401,7 +403,7 @@ bool foreground() { return s.window && gameWindow() == s.window; }
 void clearImmCandidates();
 
 void detach() {
-    if (!s.token && !s.store && !s.document) return;
+    if (!s.token && !s.store && !s.document && !s.gameplayActive) return;
     s.token = 0;
     s.pendingImm = {};
     if (s.hiddenCandidate) {
@@ -435,6 +437,13 @@ void detach() {
         if (SUCCEEDED(s.manager->GetFocus(&current)) && current == s.document)
             s.manager->SetFocus(s.previous);
         release(current);
+    }
+    if (s.gameplayActive) {
+        s.gameplayActive = false;
+        // If the host has already associated a new HIMC, leave its choice in place.
+        if (s.previousImm && s.window && !ImmContext(s.window).handle)
+            ImmAssociateContext(s.window, s.previousImm);
+        s.previousImm = nullptr;
     }
     release(s.previous);
     if (s.document) s.document->Pop(TF_POPF_ALL);
@@ -478,13 +487,6 @@ bool attachTsf() {
     if (!s.store) return false;
     locate();
     return focusDocument(static_cast<ITextStoreACP*>(s.store));
-}
-
-bool microsoftPinyin() {
-    constexpr GUID pinyin = {0xfa550b04, 0x5ad7, 0x411f, {0xa5, 0xac, 0xca, 0x03, 0x8e, 0xc5, 0x15, 0xd7}};
-    TF_INPUTPROCESSORPROFILE profile{};
-    return s.profiles && s.profiles->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD, &profile) == S_OK &&
-           profile.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR && profile.guidProfile == pinyin;
 }
 
 enum class InputRoute { Stock, Tsf, Imm };
@@ -621,15 +623,20 @@ void syncAttachment() {
 
 void sync() {
     const bool editing = refreshSnapshot();
-    const bool gameplay = !editing && s.sample.gameplay && foreground() && s.manager && microsoftPinyin();
-    if (gameplay) {
-        if (s.token || s.store) detach();
-        if (!s.document && !focusDocument(nullptr)) detach();
-    } else {
-        if (!s.token && s.document) detach();
-        if (editing) syncAttachment();
-        else detach();
+    if (!editing && s.sample.gameplay && foreground()) {
+        if (s.gameplayActive) return;
+        detach();
+        // Legacy IMEs use the HWND association even when TSF has no text store.
+        const HIMC previous = ImmAssociateContext(s.window, nullptr);
+        if (s.manager && !focusDocument(nullptr)) detach();
+        s.previousImm = previous;
+        s.gameplayActive = true;
+        s.swallowed.fill(false);
+        return;
     }
+    if (s.gameplayActive) detach();
+    if (editing) syncAttachment();
+    else detach();
 }
 
 void handleKey(MSG& msg) {
@@ -639,6 +646,10 @@ void handleKey(MSG& msg) {
     if (msg.hwnd != s.window || !foreground()) {
         return;
     }
+    // Check chat focus before consulting the IME or consuming a paired key-up.
+    flushTsf();
+    sync();
+    if (s.gameplayActive) return;
     const auto originalKey = msg.wParam;
     const auto key = originalKey == VK_PROCESSKEY ? ImmGetVirtualKey(s.window) : originalKey;
     const bool tracked = key < ImeKeyCount;
@@ -646,9 +657,6 @@ void handleKey(MSG& msg) {
     const bool follow = tracked && s.swallowed[key];
     if (tracked && up) s.swallowed[key] = false;
 
-    // Flush out-of-band TSF edits before the next key.
-    flushTsf();
-    sync();
     bool eaten = false;
     if (s.store && s.keys) {
         const bool wasComposing = s.store->composing;

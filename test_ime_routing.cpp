@@ -56,7 +56,15 @@ int main() {
     assert(SUCCEEDED(s.manager->CreateDocumentMgr(&gameplay)));
     assert(SUCCEEDED(s.manager->AssociateFocus(window, windowDoc, &prior)));
     assert(SUCCEEDED(s.manager->SetFocus(gameplay)));
-    assert(focusDocument(nullptr));
+    // Exercise the normal closed-chat route without an input profile lookup.
+    const HIMC chatContext = ImmContext(window).handle;
+    assert(chatContext);
+    s.refresh = [] { s.sample.gameplay = true; };
+    s.swallowed['W'] = true;
+    MSG releaseW{window, WM_KEYUP, 'W', 1, 0, {0, 0}};
+    handleKey(releaseW);
+    assert(releaseW.message == WM_KEYUP && releaseW.wParam == 'W');
+    assert(s.gameplayActive && !s.store && s.context && !ImmContext(window).handle);
     ITfCompartmentMgr* compartments = nullptr;
     assert(SUCCEEDED(s.context->QueryInterface(IID_PPV_ARGS(&compartments))));
     for (const GUID* id : {&GUID_COMPARTMENT_KEYBOARD_DISABLED, &GUID_COMPARTMENT_EMPTYCONTEXT}) {
@@ -70,7 +78,18 @@ int main() {
     ITfDocumentMgr* restored = nullptr;
     assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == s.document);
     release(restored);
-    detach();
+    const auto disabledDocument = s.document;
+    for (WPARAM key : {WPARAM('W'), WPARAM('A'), WPARAM('S'), WPARAM('D'), WPARAM(VK_SHIFT), WPARAM(VK_RETURN)}) {
+        for (UINT message : {WM_KEYDOWN, WM_KEYUP}) {
+            MSG event{window, message, key, 1, 0, {0, 0}};
+            handleKey(event);
+            assert(event.message == message && event.wParam == key && event.lParam == 1);
+        }
+    }
+    assert(s.document == disabledDocument && !ImmContext(window).handle);
+    s.refresh = [] {}; // Chat reopens with a stock-supported input method.
+    sync();
+    assert(!s.gameplayActive && ImmContext(window).handle == chatContext);
     assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == gameplay);
     release(restored);
     s.token = 1;
