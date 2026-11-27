@@ -25,13 +25,14 @@ _lobby = _battle = _battle_owner = None
 _library = None
 _tick_id = None
 _route_epoch = 0
+_gameplay_owner = _focus_call = None
 _binding = None
 _token = 0
 _enabled = _listening = False
 _status = None
 _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attached',
                   3: 'IMM attached', 4: 'TSF association failed',
-                  5: 'battle gameplay, keyboard hooks removed'}
+                  5: 'battle gameplay, IME released to game'}
 _errors = set()
 _candidate_display = None
 _EMPTY_CANDIDATES = (-1, [], u'')
@@ -61,7 +62,7 @@ def _refresh():
     try:
         view = _active()
         obj = view.flashObject if _enabled and view is not None else None
-        if obj and _battle_owner is not None and not _battle_owner.isFocused():
+        if obj and _battle_owner is not None and (_gameplay_owner is _battle_owner or not _battle_owner.isFocused()):
             _binding = None
             _library.ImeClear()
             return
@@ -122,22 +123,29 @@ def _update_candidates(view, page):
         _error('Could not update the candidate panel')
 
 
-def _tick():
-    global _tick_id, _status, _binding
+def _tick(closing=False):
+    global _tick_id, _status, _binding, _gameplay_owner
     _tick_id = None
     epoch = _route_epoch
     view = _active()
-    if _enabled and _battle_owner is not None and not _battle_owner.isFocused():
-        _binding = None
-        _update_candidates(None, _EMPTY_CANDIDATES)
-        if _library.ImeGameplay():
-            if _status != 5:
-                _status = 5
-                print('[WotNativeIme] ' + _status_labels[5])
+    if _enabled and _battle_owner is not None:
+        if closing or not _battle_owner.isFocused():
+            if _gameplay_owner is not _battle_owner:
+                _gameplay_owner = _battle_owner
+                _binding = None
+                try:
+                    released = _library.ImeGameplay()
+                except Exception:
+                    released = False
+                    _error('Could not release battle input bridge')
+                _update_candidates(None, _EMPTY_CANDIDATES)
+                if released and _status != 5:
+                    _status = 5
+                    print('[WotNativeIme] ' + _status_labels[5])
             return
-        if epoch == _route_epoch:
-            _tick_id = BigWorld.callback(0.05, _tick)
-        return
+        if _focus_call is _battle_owner and _gameplay_owner is _battle_owner:
+            return  # The stock open call is still running.
+    _gameplay_owner = None
     if not _enabled or view is None:
         if _library is not None:
             _library.ImeStop()
@@ -160,13 +168,13 @@ def _tick():
         _tick_id = BigWorld.callback(0.016 if attached else 0.25, _tick)
 
 
-def _switch_route():
+def _switch_route(closing=False):
     global _route_epoch, _tick_id
     _route_epoch += 1
     if _tick_id is not None:
         BigWorld.cancelCallback(_tick_id)
         _tick_id = None
-    _tick()
+    _tick(closing)
 
 
 class NativeImeView(View):
@@ -228,13 +236,24 @@ _dispose = BattleMessengerView._dispose
 
 
 def _watch_focus(original):
-    def changed(view, *args, **kwargs):
-        epoch = _route_epoch
-        focused = view.isFocused()
-        result = original(view, *args, **kwargs)
-        if _enabled and view is _battle_owner and epoch == _route_epoch and focused != view.isFocused():
-            _switch_route()
-        return result
+    def changed(view, value):
+        global _focus_call
+        if not _enabled or view is not _battle_owner:
+            return original(view, value)
+        outer = _focus_call
+        _focus_call = view
+        completed = False
+        try:
+            if not value and _gameplay_owner is not view:
+                _switch_route(closing=True)
+            result = original(view, value)
+            completed = True
+            return result
+        finally:
+            _focus_call = outer
+            if outer is not view and _enabled and _battle_owner is view and _gameplay_owner is view:
+                if (completed or not value) and view.isFocused():
+                    _switch_route()
     return changed
 
 

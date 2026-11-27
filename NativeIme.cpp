@@ -5,7 +5,6 @@
 #endif
 #include "TextStore.h"
 #include "CandidateList.h"
-#include "ThreadManager2.h"
 #include <array>
 #include <commctrl.h>
 #include <cstring>
@@ -45,8 +44,6 @@ struct State {
     HWND window = nullptr;
     enum class Transition { None, Gameplay, Stop } pending = Transition::None;
     bool gameplayActive = false;
-    ITfThreadMgr2* suspendedKeys = nullptr;
-    HIMC previousImm = nullptr;
     HHOOK hook = nullptr;
     Refresh refresh = nullptr;
     Commit commit = nullptr;
@@ -560,8 +557,8 @@ void flushTsf() {
 
 bool refreshSnapshot() {
     s.sample.token = 0;
-    if (foreground()) s.refresh();
-    return s.sample.token && foreground();
+    if (s.pending == State::Transition::None && foreground()) s.refresh();
+    return s.pending == State::Transition::None && s.sample.token && foreground();
 }
 
 void syncAttachment() {
@@ -608,6 +605,7 @@ void handleKey(MSG& msg) {
     // Check chat focus before consulting the IME or consuming a paired key-up.
     flushTsf();
     sync();
+    if (!s.token) return;
     const auto originalKey = msg.wParam;
     const auto key = originalKey == VK_PROCESSKEY ? ImmGetVirtualKey(s.window) : originalKey;
     const bool tracked = key < ImeKeyCount;
@@ -721,7 +719,7 @@ bool ImeGameplay();
 void WINAPI ImeStop();
 
 Busy::~Busy() {
-    if (!previous && !s.pendingImm.text.empty()) {
+    if (!previous && s.pending == State::Transition::None && !s.pendingImm.text.empty()) {
         try {
             auto pending = std::move(s.pendingImm);
             s.pendingImm = {};
@@ -763,7 +761,7 @@ DWORD filterCandidateNotification(WPARAM notification, DWORD mask) {
 
 bool ownsImeMessage(bool nested) {
     // A synchronous message during as_snapshot must not re-enter Flash or use the old token.
-    if (nested) return s.token && s.sample.token == s.token && foreground();
+    if (nested) return s.pending == State::Transition::None && s.token && s.sample.token == s.token && foreground();
     if (refreshSnapshot() && s.sample.token == s.token) return true;
     detach();
     return false;
@@ -867,20 +865,17 @@ void stop() {
     if (s.hook) UnhookWindowsHookEx(s.hook);
     s.hook = nullptr;
     detach();
-    if (s.gameplayActive) {
-        if (s.previousImm && GetWindowThreadProcessId(s.window, nullptr) == s.thread && !ImmContext(s.window).handle)
-            ImmAssociateContext(s.window, s.previousImm);
-        if (s.suspendedKeys) s.suspendedKeys->ResumeKeystrokeHandling();
-        release(s.suspendedKeys);
-    } else if (s.window) RemoveWindowSubclass(s.window, wndProc, SubclassId);
+    if (s.window) RemoveWindowSubclass(s.window, wndProc, SubclassId);
     release(s.keys);
     release(s.profiles);
     if (s.activated) s.manager->Deactivate();
     release(s.manager);
     if (s.coInitialized) CoUninitialize();
     const bool busy = s.busy;
+    const auto pending = s.pending;
     s = State{};
     s.busy = busy;
+    s.pending = pending;
 }
 
 void initialize(HWND window) {
@@ -910,21 +905,8 @@ bool ImeGameplay() {
         return false;
     }
     Busy busy;
-    const HWND window = gameWindow();
-    if (s.gameplayActive && window && window == s.window) return true;
     if (s.thread) stop();
-    if (!window) return false;
-    initialize(window);
-    // Suspend TSF at its source. Gameplay has neither a message hook nor a subclass.
-    if (s.manager) {
-        if (FAILED(s.manager->QueryInterface(IID_PPV_ARGS(&s.suspendedKeys))) ||
-            s.suspendedKeys->SuspendKeystrokeHandling() != S_OK) {
-            release(s.suspendedKeys);
-            stop();
-            return false;
-        }
-    }
-    s.previousImm = ImmAssociateContext(window, nullptr);
+    // Status 5 is bookkeeping only. The host owns the thread and window input state.
     s.gameplayActive = true;
     return true;
 }
@@ -936,6 +918,7 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
     if (s.hook && s.window && (!window || window == s.window)) return 1;
     Busy busy;
     if (s.thread) stop();
+    s.gameplayActive = false;
     if (!window || !refresh || !commitCallback) return 0;
     initialize(window);
     s.refresh = refresh;
@@ -953,7 +936,7 @@ void WINAPI ImeStop() {
         s.pending = State::Transition::Stop;
         return;
     }
-    if (!s.thread) return;
+    if (!s.thread) { s.gameplayActive = false; return; }
     Busy busy;
     stop();
 }
@@ -1087,7 +1070,10 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
 
 PyObject* gameplayPython(PyObject*, PyObject*) {
-    return PyBool_FromLong(ImeGameplay());
+    const bool stopped = ImeGameplay();
+    Py_CLEAR(pyRefresh);
+    Py_CLEAR(pyCommit);
+    return PyBool_FromLong(stopped);
 }
 
 PyObject* clearPython(PyObject*, PyObject*) {

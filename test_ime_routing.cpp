@@ -67,17 +67,20 @@ int main() {
     {
         Busy nestedCallback;
         assert(!ImeGameplay());
+        assert(SUCCEEDED(host->SetFocus(windowDoc))); // Host handoff before the deferred detach.
     }
-    assert(ImeGameplay() && ImeStatus() == 5 && s.suspendedKeys && !s.hook);
+    assert(ImeStatus() == 5 && !s.hook && !s.manager);
+    assert(ImeGameplay());
     DWORD_PTR subclassData = 0;
     // comctl32 v5 exposes GetWindowSubclass by ordinal on this Windows version.
     const auto getSubclass = reinterpret_cast<decltype(&GetWindowSubclass)>(
         reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"comctl32.dll"), MAKEINTRESOURCEA(411))));
     assert(getSubclass && !getSubclass(window, wndProc, SubclassId, &subclassData));
-    assert(!ImmContext(window).handle);
+    assert(ImmContext(window).handle == chatContext);
     ITfDocumentMgr* restored = nullptr;
-    assert(SUCCEEDED(host->GetFocus(&restored)) && restored == gameplay);
+    assert(SUCCEEDED(host->GetFocus(&restored)) && restored == windowDoc);
     release(restored);
+    assert(SUCCEEDED(host->SetFocus(gameplay)));
     for (WPARAM key : {WPARAM('W'), WPARAM('A'), WPARAM('S'), WPARAM('D'), WPARAM(VK_SHIFT), WPARAM(VK_RETURN)}) {
         for (UINT message : {WM_KEYDOWN, WM_KEYUP}) {
             const LPARAM bits = message == WM_KEYDOWN ? 1 : 0xc0000001u;
@@ -88,7 +91,7 @@ int main() {
         }
     }
     assert(ImeStart([] {}, [](unsigned, const wchar_t*, int, int, int, const wchar_t*, int, int, int) { return 0; }));
-    assert(s.hook && !s.gameplayActive && !s.suspendedKeys && ImmContext(window).handle == chatContext);
+    assert(s.hook && ImeStatus() == 1 && ImmContext(window).handle == chatContext);
     assert(getSubclass(window, wndProc, SubclassId, &subclassData));
     assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == gameplay);
     release(restored);
@@ -110,11 +113,20 @@ int main() {
     }
     assert(SUCCEEDED(s.manager->AssociateFocus(window, prior, &restored)) && restored == windowDoc);
     release(restored);
-    // A host can change focus itself while closing the chat.
+    // The host closes chat and takes focus inside the key-up snapshot callback.
     s.token = 1;
-    assert(attachTsf() && SUCCEEDED(s.manager->SetFocus(windowDoc)));
-    handleKey(move);
-    assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == windowDoc);
+    assert(attachTsf());
+    static ITfDocumentMgr* handoff = windowDoc;
+    s.refresh = [] {
+        assert(!ImeGameplay());
+        assert(SUCCEEDED(s.manager->SetFocus(handoff)));
+        s.sample.token = 1; // The snapshot already in flight belongs to the closed chat.
+    };
+    s.swallowed['W'] = true;
+    MSG released{window, WM_KEYUP, 'W', 0xc0000001u, 0, {0, 0}};
+    getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&released));
+    assert(released.message == WM_KEYUP && released.wParam == 'W' && released.lParam == 0xc0000001u);
+    assert(ImeStatus() == 5 && SUCCEEDED(host->GetFocus(&restored)) && restored == windowDoc);
     release(restored);
     release(prior);
     release(gameplay);
@@ -122,7 +134,7 @@ int main() {
     ImeStop();
     assert(ImeStatus() == 0);
 
-    assert(ImeGameplay() && !s.hook && s.suspendedKeys && !ImmContext(window).handle);
+    assert(ImeGameplay() && ImeStatus() == 5 && !s.hook && !s.manager && ImmContext(window).handle == chatContext);
     ImeStop();
     assert(ImmContext(window).handle == chatContext && ImeStatus() == 0);
     host->Deactivate();
