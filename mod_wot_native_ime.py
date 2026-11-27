@@ -26,7 +26,7 @@ _library = None
 _tick_id = None
 _route_epoch = 0
 _gameplay_owner = _focus_call = None
-_battle_baseline = False  # None permits one retry before the first stock chat open.
+_battle_baseline = False
 _binding = None
 _token = 0
 _enabled = _listening = False
@@ -255,18 +255,19 @@ def _gui_released(view):
             and not BigWorld.player().isForcedGuiControlMode())
 
 
-def _capture_baseline(view, allow_retry):
+def _capture_baseline(view):
     global _battle_baseline
+    if _battle_baseline or _gameplay_owner is not view:
+        return
     epoch = _route_epoch
-    _battle_baseline = False
     try:
-        ready = (_gameplay_owner is view and not view.isFocused() and _gui_released(view)
-                 and _library.ImeStatus() == 5 and _library.ImeBattleBaseline())
+        ready = (not view.isFocused() and _gui_released(view) and _library.ImeStatus() == 5
+                 and _library.ImeBattleBaseline())
     except Exception:
-        ready = False
         _error('Could not sample battle input baseline')
+        return
     if _enabled and _battle_owner is view and epoch == _route_epoch:
-        _battle_baseline = ready or (None if allow_retry else False)
+        _battle_baseline = ready
 
 
 def _queue_handoff(view, epoch, attempt=1):
@@ -277,7 +278,13 @@ def _queue_handoff(view, epoch, attempt=1):
             return
         _tick_id = None
         try:
-            if _gameplay_owner is not view or view.isFocused():
+            if _gameplay_owner is not view:
+                return
+            if view.isFocused():
+                _switch_route()  # Flash retained the field after accepting a send.
+                return
+            if not _battle_baseline:
+                print('[WotNativeIme] battle handoff baseline=0 result=no-baseline')
                 return
             result = _library.ImeBattleHandoff() if _gui_released(view) else 'gui-consumer'
             print('[WotNativeIme] battle handoff baseline=%d result=%s attempt=%d' %
@@ -292,7 +299,7 @@ def _queue_handoff(view, epoch, attempt=1):
 
 def _watch_focus(original, before_open=False):
     def changed(view, value):
-        global _focus_call, _battle_baseline
+        global _focus_call
         if not _enabled or view is not _battle_owner:
             return original(view, value)
         outer = _focus_call
@@ -302,11 +309,8 @@ def _watch_focus(original, before_open=False):
         try:
             if value and _gameplay_owner is view and _tick_id is not None:
                 _cancel_route()  # Invalidate the last close before stock can reenter.
-            if value and _battle_baseline is None:
-                if before_open and outer is not view:
-                    _capture_baseline(view, False)
-                else:
-                    _battle_baseline = False
+            if value and before_open and outer is not view:
+                _capture_baseline(view)
             if not value and _gameplay_owner is not view:
                 close_epoch = _switch_route(closing=True)
             result = original(view, value)
@@ -317,13 +321,50 @@ def _watch_focus(original, before_open=False):
             if outer is not view and _enabled and _battle_owner is view and _gameplay_owner is view:
                 if (completed or not value) and view.isFocused():
                     _switch_route()
-                elif completed and _battle_baseline and close_epoch == _route_epoch:
-                    _queue_handoff(view, close_epoch)
+                elif completed and close_epoch == _route_epoch:
+                    if _battle_baseline:
+                        _queue_handoff(view, close_epoch)
+                    else:
+                        print('[WotNativeIme] battle handoff baseline=0 result=no-baseline')
     return changed
 
 
-_focus_hooks = [(name, getattr(BattleMessengerView, name), _watch_focus(getattr(BattleMessengerView, name), name == 'setFocused'))
-                for name in ('setFocused', '_BattleMessengerView__setGuiMode')]
+def _watch_enter(original):
+    def enter(view, *args, **kwargs):
+        # Stock Enter opens Flash directly, before Python receives focusReceived.
+        if _enabled and _battle_owner is view and _focus_call is not view:
+            _capture_baseline(view)
+        return original(view, *args, **kwargs)
+    return enter
+
+
+def _watch_send(original):
+    def send(view, cid, message):
+        epoch = _route_epoch
+        accepted = original(view, cid, message)
+        if accepted and message and _enabled and _battle_owner is view and epoch == _route_epoch:
+            try:
+                if _gameplay_owner is not view and view.isFocused():
+                    # Flash disables the field after it receives the successful reply.
+                    close_epoch = _switch_route(closing=True)
+                    if close_epoch == _route_epoch and _enabled and _battle_owner is view:
+                        _queue_handoff(view, close_epoch)
+                        print('[WotNativeIme] battle send accepted, handoff queued')
+            except Exception:
+                _error('Could not prepare battle handoff after send')
+        return accepted
+    return send
+
+
+def _chat_hooks(cls):
+    return [(name, original, hook(original)) for name, original, hook in (
+        ('sendMessageToChannel', cls.sendMessageToChannel, _watch_send),
+        ('handleEnterPressed', cls.handleEnterPressed, _watch_enter),
+        ('setFocused', cls.setFocused, lambda fn: _watch_focus(fn, before_open=True)),
+        ('_BattleMessengerView__setGuiMode', cls._BattleMessengerView__setGuiMode, _watch_focus))]
+
+
+_focus_hooks = _chat_hooks(BattleMessengerView)
 
 
 def _end_battle():
@@ -345,7 +386,7 @@ def _on_populate(view):
         _battle_owner, _battle, _binding = view, None, None
         entry_epoch = _switch_route()
         if _battle_owner is view and entry_epoch == _route_epoch and _gameplay_owner is view:
-            _capture_baseline(view, True)
+            _capture_baseline(view)
         try:
             _load_view(view.app, BATTLE)
         except Exception:

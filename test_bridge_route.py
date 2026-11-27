@@ -334,7 +334,7 @@ def test_routes():
     chat.app = None
     native.chat_document = False  # Simulate the new battle's clean driving focus.
     state['_on_populate'](chat)
-    assert state['_battle_baseline'] is None
+    assert not state['_battle_baseline']
     chat.app = chat
     state['_battle'] = view
     native.events[:] = []
@@ -345,7 +345,7 @@ def test_routes():
     assert change(chat, True)
     assert native.events.count('baseline') == 1
 
-    # A failed retry is terminal for this battle. fini cancels the last pending handoff.
+    # An unavailable baseline permits another observation at the next safe open.
     state['_on_dispose'](chat)
     chat.opened = False
     chat.consumers.clear()
@@ -359,7 +359,7 @@ def test_routes():
     for i in range(2):
         assert change(chat, True) and change(chat, False)
         assert state['_battle_baseline'] is False and clock.pending is None
-    assert native.events.count('no-baseline') == 2
+    assert native.events.count('no-baseline') == 3  # Entry and two deliberate opens, no timer.
     # Leave a real handoff queued in a fresh battle for the shutdown case.
     state['_on_dispose'](chat)
     native.chat_document = False
