@@ -233,7 +233,7 @@ std::wstring immText(HIMC handle, DWORD kind) {
 
 bool composing() { return s.store ? s.store->composing : s.immComposing; }
 
-bool sameCandidate(ITfCandidateListUIElement* a, ITfCandidateListUIElement* b) {
+bool sameCom(IUnknown* a, IUnknown* b) {
     if (a == b) return true;
     if (!a || !b) return false;
     // A provider can return distinct interface pointers for the same COM object.
@@ -266,7 +266,7 @@ void sampleCandidateUI() {
                 auto list = ownedCandidate(element);
                 element = nullptr;
                 if (!list) continue;
-                const bool hidden = sameCandidate(list.get(), s.hiddenCandidate.get());
+                const bool hidden = sameCom(list.get(), s.hiddenCandidate.get());
                 hiddenPresent |= hidden;
                 BOOL visible = FALSE;
                 if (list->IsShown(&visible) != S_OK) {
@@ -287,7 +287,7 @@ void sampleCandidateUI() {
             complete = step == S_FALSE;
             release(element);
         }
-        if (s.hiddenCandidate && (nativeVisible || !sameCandidate(chosen.get(), s.hiddenCandidate.get()))) {
+        if (s.hiddenCandidate && (nativeVisible || !sameCom(chosen.get(), s.hiddenCandidate.get()))) {
             if (hiddenPresent || !complete) {
                 nativeVisible = true;
                 if (s.hiddenCandidate->Show(TRUE) == S_OK) s.hiddenCandidate.reset();
@@ -400,6 +400,70 @@ HWND gameWindow() {
 
 bool foreground() { return s.window && gameWindow() == s.window; }
 
+// A non-null window means we observed an empty TSF focus before stock chat opened.
+// Keep the two document identities alive across stop(), until this chat hands off.
+struct BattleChat {
+    Com<ITfDocumentMgr> plugin, chat;
+    Com<ITfContext> top, pluginBase;
+};
+struct BattleFocus {
+    HWND window = nullptr;
+    BattleChat round;
+};
+thread_local BattleFocus battle;
+
+Com<ITfThreadMgr> existingManager() {
+    const auto module = GetModuleHandleW(L"msctf.dll");
+    using GetManager = HRESULT (WINAPI *)(ITfThreadMgr**);
+    const auto get = module ? reinterpret_cast<GetManager>(reinterpret_cast<void*>(
+        GetProcAddress(module, "TF_GetThreadMgr"))) : nullptr;
+    ITfThreadMgr* manager = nullptr;
+    if (get) get(&manager);
+    return Com<ITfThreadMgr>(manager);
+}
+
+void ImeBattleEnd() { battle = {}; }
+
+bool ImeBattleBaseline() {
+    ImeBattleEnd();
+    const HWND window = gameWindow();
+    if (!window || s.busy || s.thread || ImmContext(window).handle) return false;
+    const auto manager = existingManager();
+    ITfDocumentMgr* current = nullptr;
+    const bool empty = manager && SUCCEEDED(manager->GetFocus(&current)) && !current;
+    release(current);
+    if (empty) battle.window = window;
+    return empty;
+}
+
+const char* ImeBattleHandoff() {
+    const auto round = std::move(battle.round);
+    if (!battle.window) return "no-baseline";
+    if (!round.plugin) return "no-attachment";
+    if (s.busy || s.thread || !s.gameplayActive) return "not-released";
+    if (gameWindow() != battle.window) return "window-changed";
+    if (ImmContext(battle.window).handle) return "host-himc";
+    const auto manager = existingManager();
+    ITfDocumentMgr* current = nullptr;
+    if (!manager || FAILED(manager->GetFocus(&current))) return "focus-unavailable";
+    const Com<ITfDocumentMgr> focused(current);
+    if (!current) return "already-clear";
+    const bool ours = sameCom(current, round.plugin.get());
+    if (!ours && !sameCom(current, round.chat.get())) return "foreign";
+    ITfContext* top = nullptr;
+    const HRESULT result = current->GetTop(&top);
+    const Com<ITfContext> context(top);
+    // Some TSF providers expose a default top on an otherwise empty document.
+    if (FAILED(result) || !sameCom(top, ours ? round.pluginBase.get() : round.top.get())) return "foreign-context";
+    if (FAILED(manager->SetFocus(nullptr))) return "restore-failed";
+    ITfDocumentMgr* after = nullptr;
+    const HRESULT readBack = manager->GetFocus(&after);
+    const Com<ITfDocumentMgr> observed(after);
+    if (FAILED(readBack)) return "restore-unconfirmed";
+    if (after) return "focus-replaced";
+    return ours ? "restored-plugin" : "restored-chat";
+}
+
 void clearImmCandidates();
 
 void detach() {
@@ -453,10 +517,29 @@ bool attachTsf() {
     if (!s.store) return false;
     locate();
     TfEditCookie cookie;
-    return SUCCEEDED(s.manager->CreateDocumentMgr(&s.document)) &&
-           SUCCEEDED(s.document->CreateContext(s.client, 0, static_cast<ITextStoreACP*>(s.store), &s.context, &cookie)) &&
-           SUCCEEDED(s.document->Push(s.context)) && SUCCEEDED(s.manager->GetFocus(&s.previous)) &&
-           SUCCEEDED(s.manager->SetFocus(s.document));
+    if (FAILED(s.manager->CreateDocumentMgr(&s.document))) return false;
+    const bool inBattle = battle.window && battle.window == s.window;
+    ITfContext* base = nullptr;
+    if (inBattle) s.document->GetTop(&base);
+    Com<ITfContext> pluginBase(base);
+    if (FAILED(s.document->CreateContext(s.client, 0, static_cast<ITextStoreACP*>(s.store), &s.context, &cookie)) ||
+        FAILED(s.document->Push(s.context)) || FAILED(s.manager->GetFocus(&s.previous))) return false;
+    const bool first = battle.window == s.window && !battle.round.plugin;
+    ITfContext* top = nullptr;
+    const bool identified = first && s.previous && SUCCEEDED(s.previous->GetTop(&top));
+    Com<ITfContext> chatTop(top);
+    if (FAILED(s.manager->SetFocus(s.document))) return false;
+    if (battle.window && battle.window == s.window) {
+        if (identified) {
+            s.previous->AddRef();
+            battle.round.chat.reset(s.previous);
+            battle.round.top = std::move(chatTop);
+        }
+        s.document->AddRef();
+        battle.round.plugin.reset(s.document);
+        battle.round.pluginBase = std::move(pluginBase);
+    }
+    return true;
 }
 
 enum class InputRoute { Stock, Tsf, Imm };
@@ -828,6 +911,7 @@ void handleQueuedIme(MSG& msg) {
 
 LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
     if (message == WM_NCDESTROY) {
+        if (battle.window == window) ImeBattleEnd();
         if (!s.busy) { Busy busy; detach(); }
         RemoveWindowSubclass(window, wndProc, id);
         s.window = nullptr;
@@ -921,6 +1005,7 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
     if (s.hook && s.window && (!window || window == s.window)) return 1;
     Busy busy;
     if (s.thread) stop();
+    battle.round = {};
     s.gameplayActive = false;
     if (!window || !refresh || !commitCallback) return 0;
     initialize(window);
@@ -1072,6 +1157,10 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
 
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
 
+PyObject* battleBaselinePython(PyObject*, PyObject*) { return PyBool_FromLong(ImeBattleBaseline()); }
+PyObject* battleHandoffPython(PyObject*, PyObject*) { return PyString_FromString(ImeBattleHandoff()); }
+PyObject* battleEndPython(PyObject*, PyObject*) { ImeBattleEnd(); Py_RETURN_NONE; }
+
 PyObject* gameplayPython(PyObject*, PyObject*) {
     const bool stopped = ImeGameplay();
     Py_CLEAR(pyRefresh);
@@ -1106,6 +1195,9 @@ PyMethodDef methods[] = {
     {"ImeCandidates", candidatesPython, METH_NOARGS, nullptr},
     {"ImeStatus", statusPython, METH_NOARGS, nullptr},
     {"ImeGameplay", gameplayPython, METH_NOARGS, nullptr},
+    {"ImeBattleBaseline", battleBaselinePython, METH_NOARGS, nullptr},
+    {"ImeBattleHandoff", battleHandoffPython, METH_NOARGS, nullptr},
+    {"ImeBattleEnd", battleEndPython, METH_NOARGS, nullptr},
     {"ImeClear", clearPython, METH_NOARGS, nullptr},
     {"ImeSnapshot", snapshotPython, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},

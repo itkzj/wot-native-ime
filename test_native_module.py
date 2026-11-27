@@ -8,6 +8,11 @@ sys.modules['_ctypes'] = None
 path = os.path.abspath('build/_wot_native_ime.pyd')
 ime = imp.load_dynamic('_wot_native_ime', path)
 assert ime.ImeStatus() == 0
+assert ime.ImeBattleEnd() is None
+assert isinstance(ime.ImeBattleBaseline(), bool)
+assert isinstance(ime.ImeBattleHandoff(), basestring)
+assert ime.ImeBattleEnd() is None
+assert ime.ImeStatus() == 0
 assert not hasattr(ime, 'ImeDiagnostics')
 assert ime.ImeCandidates() == (-1, [], u'')
 try:

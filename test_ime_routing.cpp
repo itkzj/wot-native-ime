@@ -25,6 +25,7 @@ static BOOL WINAPI testIsIme(HKL) { return TRUE; }
 
 int main() {
     _set_error_mode(_OUT_TO_STDERR);
+    assert(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))); // The host owns its COM apartment.
     constexpr LRESULT stock = 71;
     static LPARAM hostImeFlags;
     WNDCLASSW cls{};
@@ -130,6 +131,78 @@ int main() {
     assert(released.message == WM_KEYUP && released.wParam == 'W' && released.lParam == 0xc0000001u);
     assert(ImeStatus() == 5 && SUCCEEDED(host->GetFocus(&restored)) && restored == windowDoc);
     release(restored);
+    // Battle entry precedes stock chat opening. The previous focus at attach is the chat, not gameplay.
+    assert(ImmAssociateContext(window, nullptr) == chatContext);
+    assert(SUCCEEDED(host->SetFocus(nullptr)));
+    assert(ImeBattleBaseline());
+    const auto closeChat = [&] {
+        assert(SUCCEEDED(host->SetFocus(windowDoc)));
+        assert(ImeStart([] {}, [](unsigned, const wchar_t*, int, int, int, const wchar_t*, int, int, int) { return 0; }));
+        s.token = 1;
+        assert(attachTsf());
+        ITfDocumentMgr* plugin = nullptr;
+        assert(SUCCEEDED(host->GetFocus(&plugin)) && plugin == s.document);
+        assert(ImeGameplay()); // The original close handler can still run after this detach.
+        return Com<ITfDocumentMgr>(plugin);
+    };
+    const auto expectHandoff = [](const char* expected) {
+        const auto actual = ImeBattleHandoff();
+        if (std::strcmp(actual, expected)) std::fprintf(stderr, "Wanted %s, got %s\n", expected, actual);
+        assert(std::strcmp(actual, expected) == 0);
+    };
+    const auto expectFocus = [&](ITfDocumentMgr* expected) {
+        ITfDocumentMgr* current = nullptr;
+        assert(SUCCEEDED(host->GetFocus(&current)) && current == expected);
+        release(current);
+    };
+    assert(std::string(ImeBattleHandoff()) == "no-attachment");
+    closeChat(); // Stock chat may also have no context.
+    expectFocus(windowDoc);
+    assert(std::string(ImeBattleHandoff()) == "restored-chat");
+    expectFocus(nullptr);
+    {
+        auto plugin = closeChat();
+        assert(SUCCEEDED(host->SetFocus(plugin.get())));
+        expectHandoff("restored-plugin");
+        expectFocus(nullptr);
+    }
+    closeChat();
+    assert(SUCCEEDED(host->SetFocus(gameplay)));
+    assert(std::string(ImeBattleHandoff()) == "foreign");
+    expectFocus(gameplay);
+    assert(SUCCEEDED(host->SetFocus(windowDoc)));
+    assert(std::string(ImeBattleHandoff()) == "no-attachment"); // Already consumed.
+    expectFocus(windowDoc);
+
+    ITfContext *chatTop = nullptr, *newTop = nullptr;
+    TfEditCookie cookie;
+    assert(SUCCEEDED(windowDoc->CreateContext(hostId, 0, nullptr, &chatTop, &cookie)));
+    assert(SUCCEEDED(windowDoc->Push(chatTop)));
+    closeChat();
+    assert(std::string(ImeBattleHandoff()) == "restored-chat");
+    expectFocus(nullptr);
+    closeChat();
+    assert(SUCCEEDED(windowDoc->CreateContext(hostId, 0, nullptr, &newTop, &cookie)));
+    assert(SUCCEEDED(windowDoc->Push(newTop)));
+    assert(std::string(ImeBattleHandoff()) == "foreign-context");
+    expectFocus(windowDoc);
+    assert(SUCCEEDED(windowDoc->Pop(TF_POPF_ALL)));
+    release(newTop);
+    release(chatTop);
+
+    closeChat();
+    ImmAssociateContext(window, chatContext);
+    assert(SUCCEEDED(host->SetFocus(windowDoc)));
+    assert(std::string(ImeBattleHandoff()) == "host-himc");
+    expectFocus(windowDoc);
+    closeChat();
+    ImeBattleEnd();
+    assert(std::string(ImeBattleHandoff()) == "no-baseline");
+    expectFocus(windowDoc);
+    assert(ImmAssociateContext(window, nullptr) == chatContext);
+    assert(SUCCEEDED(host->SetFocus(windowDoc)));
+    assert(!ImeBattleBaseline()); // A populated gameplay baseline is outside the measured case.
+    ImmAssociateContext(window, chatContext);
     release(prior);
     release(gameplay);
     release(windowDoc);
@@ -279,5 +352,6 @@ int main() {
     SendMessageW(window, WM_IME_STARTCOMPOSITION, 0, 0);
     assert(!s.immComposing);
     DestroyWindow(window);
-    std::puts("Queued, sent and nested IMM routing passed");
+    CoUninitialize();
+    std::puts("Battle TSF handoff and queued, sent and nested IMM routing passed");
 }

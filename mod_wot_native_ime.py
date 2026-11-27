@@ -26,6 +26,7 @@ _library = None
 _tick_id = None
 _route_epoch = 0
 _gameplay_owner = _focus_call = None
+_battle_baseline = False  # None permits one retry before the first stock chat open.
 _binding = None
 _token = 0
 _enabled = _listening = False
@@ -168,12 +169,16 @@ def _tick(closing=False):
         _tick_id = BigWorld.callback(0.016 if attached else 0.25, _tick)
 
 
-def _switch_route(closing=False):
+def _cancel_route():
     global _route_epoch, _tick_id
     _route_epoch += 1
     if _tick_id is not None:
         BigWorld.cancelCallback(_tick_id)
         _tick_id = None
+
+
+def _switch_route(closing=False):
+    _cancel_route()
     _tick(closing)
 
 
@@ -235,16 +240,63 @@ _populate = BattleMessengerView._populate
 _dispose = BattleMessengerView._dispose
 
 
-def _watch_focus(original):
+def _gui_released(view):
+    # The public hasGuiControlModeConsumers(*ids) only checks the specified IDs.
+    return (len(view.app._BattleEntry__input._BattleGameInputMgr__consumers) == 0
+            and not BigWorld.player().isForcedGuiControlMode())
+
+
+def _capture_baseline(view, allow_retry):
+    global _battle_baseline
+    epoch = _route_epoch
+    _battle_baseline = False
+    try:
+        ready = (_gameplay_owner is view and not view.isFocused() and _gui_released(view)
+                 and _library.ImeStatus() == 5 and _library.ImeBattleBaseline())
+    except Exception:
+        ready = False
+        _error('Could not sample battle input baseline')
+    if _enabled and _battle_owner is view and epoch == _route_epoch:
+        _battle_baseline = ready or (None if allow_retry else False)
+
+
+def _queue_handoff(view, epoch):
+    global _tick_id
+    def after_stock_close():
+        global _tick_id
+        if not _enabled or epoch != _route_epoch or _battle_owner is not view:
+            return
+        _tick_id = None
+        try:
+            if _gameplay_owner is not view or view.isFocused():
+                return
+            result = _library.ImeBattleHandoff() if _gui_released(view) else 'gui-consumer'
+            print('[WotNativeIme] battle handoff baseline=%d result=%s' % (bool(_battle_baseline), result))
+        except Exception:
+            _error('Could not hand battle input back to game')
+    # focusLostS can run inside a Scaleform event. Let the host finish that stack.
+    _tick_id = BigWorld.callback(0, after_stock_close)
+
+
+def _watch_focus(original, before_open=False):
     def changed(view, value):
-        global _focus_call
+        global _focus_call, _battle_baseline
         if not _enabled or view is not _battle_owner:
             return original(view, value)
         outer = _focus_call
         _focus_call = view
         completed = False
+        close_epoch = None
         try:
+            if value and _gameplay_owner is view and _tick_id is not None:
+                _cancel_route()  # Invalidate the last close before stock can reenter.
+            if value and _battle_baseline is None:
+                if before_open and outer is not view:
+                    _capture_baseline(view, False)
+                else:
+                    _battle_baseline = False
             if not value and _gameplay_owner is not view:
+                close_epoch = _route_epoch + 1
                 _switch_route(closing=True)
             result = original(view, value)
             completed = True
@@ -254,19 +306,36 @@ def _watch_focus(original):
             if outer is not view and _enabled and _battle_owner is view and _gameplay_owner is view:
                 if (completed or not value) and view.isFocused():
                     _switch_route()
+                elif completed and close_epoch == _route_epoch:
+                    _queue_handoff(view, close_epoch)
     return changed
 
 
-_focus_hooks = [(name, getattr(BattleMessengerView, name), _watch_focus(getattr(BattleMessengerView, name)))
+_focus_hooks = [(name, getattr(BattleMessengerView, name), _watch_focus(getattr(BattleMessengerView, name), name == 'setFocused'))
                 for name in ('setFocused', '_BattleMessengerView__setGuiMode')]
+
+
+def _end_battle():
+    global _battle_owner, _battle, _binding, _battle_baseline, _gameplay_owner
+    _battle_owner = _battle = _binding = _gameplay_owner = None
+    _battle_baseline = False
+    try:
+        _library.ImeBattleEnd()
+    except Exception:
+        _error('Could not clear battle input baseline')
 
 
 def _on_populate(view):
     global _battle_owner, _battle, _binding
     result = _populate(view)
-    if _enabled:
+    if _enabled and _battle_owner is not view:
+        if _battle_owner is not None:
+            _end_battle()
         _battle_owner, _battle, _binding = view, None, None
+        entry_epoch = _route_epoch + 1
         _switch_route()
+        if _battle_owner is view and entry_epoch == _route_epoch and _gameplay_owner is view:
+            _capture_baseline(view, True)
         try:
             _load_view(view.app, BATTLE)
         except Exception:
@@ -275,9 +344,8 @@ def _on_populate(view):
 
 
 def _on_dispose(view):
-    global _battle_owner, _battle, _binding
     if _battle_owner is view:
-        _battle_owner = _battle = _binding = None
+        _end_battle()
         _switch_route()
     return _dispose(view)
 
@@ -306,6 +374,8 @@ def init():
 def fini():
     global _enabled, _listening, _tick_id, _binding
     _enabled = False
+    if _battle_owner is not None:
+        _end_battle()
     _binding = None
     if _listening:
         g_eventBus.removeListener(events.GUICommonEvent.LOBBY_VIEW_LOADED, _on_lobby_loaded)

@@ -38,6 +38,25 @@ class Native(object):
         self.token = 'gameplay'
         return True
 
+    baseline = False
+    chat_document = False
+
+    def ImeBattleBaseline(self):
+        self.events.append('baseline')
+        self.baseline = not self.chat_document
+        return self.baseline
+
+    def ImeBattleHandoff(self):
+        self.events.append('handoff')
+        if not self.baseline:
+            return 'skipped'
+        self.chat_document = False
+        return 'restored-chat'
+
+    def ImeBattleEnd(self):
+        self.baseline = False
+        self.events.append('end')
+
     def ImeStart(self, refresh, commit):
         if self.events is not None:
             self.events.append('attach')
@@ -50,6 +69,8 @@ class Native(object):
         self.refresh()
 
     def ImeStatus(self):
+        if self.token == 'gameplay':
+            return 5
         return 2 if self.token else 1
 
     def ImeCandidates(self):
@@ -96,17 +117,32 @@ assert view.pages == [(1, page), (0, state['_EMPTY_CANDIDATES']), (2, page), (3,
 class BattleChat(object):
     opened = False
 
+    def __init__(self):
+        self.app = self._BattleEntry__input = self
+        self.consumers = self._BattleGameInputMgr__consumers = set()
+
     def isFocused(self):
         return self.opened
 
 
 class Clock(object):
     pending = None
+    forced_gui = False
+
+    def player(self):
+        return self
+
+    def isForcedGuiControlMode(self):
+        return self.forced_gui
 
     def callback(self, delay, callback):
         assert self.pending is None
         self.pending = callback
         return 1
+
+    def run(self):
+        callback, self.pending = self.pending, None
+        callback()
 
     def cancelCallback(self, handle):
         assert handle == 1 and self.pending
@@ -115,11 +151,18 @@ class Clock(object):
 
 clock = Clock()
 chat = BattleChat()
-state.update(_battle_owner=chat, _battle=view, _gameplay_owner=None, _focus_call=None,
+state.update(_battle_owner=None, _battle=None, _gameplay_owner=None, _focus_call=None,
+             _battle_baseline=False, _populate=lambda owner: None, _dispose=lambda owner: None,
+             BATTLE='battle', _load_view=lambda *args: None,
              BigWorld=clock, _status=None, _tick_id=None, _route_epoch=0,
              _status_labels={1: 'stock', 2: 'editing', 5: 'direct'})
 def stock_mode(owner, value):
     owner.opened = value
+    if value:
+        native.chat_document = True  # The stock close can leave this TSF focus behind.
+        owner.consumers.add('chat')
+    else:
+        owner.consumers.discard('chat')
     native.events.append('enter' if value else 'leave')
     native.focus = 'stock-chat' if value else 'vehicle'
 
@@ -133,9 +176,11 @@ def stock_set_focused(owner, value):
     native.events.append('set-done')
     return True
 
-change = state['_watch_focus'](stock_set_focused)
+change = state['_watch_focus'](stock_set_focused, before_open=True)
 native.events = []
-state['_switch_route']()  # Enter battle with chat closed, even with a stale Flash snapshot.
+state['_on_populate'](chat)
+assert native.events == ['release', 'baseline'], native.events
+state['_battle'] = view
 assert native.token == 'gameplay' and state['_binding'] is None and clock.pending is None
 native.events[:] = []
 assert change(chat, True)
@@ -149,6 +194,9 @@ assert change(chat, False)
 assert native.focus == 'vehicle', (native.focus, native.events)
 assert native.events == ['release', 'leave', 'set-done']
 assert not change(chat, False) and native.events == ['release', 'leave', 'set-done']
+assert native.chat_document  # Matches the post-close TSF residue despite vehicle focus.
+clock.run()
+assert not native.chat_document and native.events == ['release', 'leave', 'set-done', 'handoff']
 assert native.token == 'gameplay' and clock.pending is None
 change(chat, True)
 assert native.token == 0 and clock.pending
@@ -168,7 +216,9 @@ def reentrant_release():
     raise RuntimeError('native release error')
 
 native.ImeGameplay = reentrant_release
-assert change(chat, False) and native.focus == 'vehicle' and clock.pending is None
+assert change(chat, False) and native.focus == 'vehicle'
+clock.run()
+assert clock.pending is None
 assert samples == [(0, 0)]
 assert errors == ['Could not release battle input bridge']
 native.ImeGameplay = release
@@ -202,8 +252,88 @@ assert native.focus == 'vehicle' and clock.pending is None
 mode(chat, True)  # A later stock focusReceived can finish entering chat.
 assert native.focus == 'ime' and clock.pending
 
+# Another GUI consumer can outlive chat. A late consumer can also arrive before the next frame.
+for consumer in ('map', 'chat', None):
+    if consumer == 'map':
+        chat.consumers.add(consumer)  # Retains its control throughout the stock close.
+    assert change(chat, False)
+    if consumer == 'chat':
+        chat.consumers.add(consumer)  # Late GUI ownership at the time of the callback.
+    clock.forced_gui = consumer is None
+    native.events[:] = []
+    clock.run()
+    assert native.events == [] and clock.pending is None
+    chat.consumers.clear()
+    clock.forced_gui = False
+    assert change(chat, True)
+
+# A dequeued callback cannot touch a reopened chat, or cancel the newer timer.
+assert change(chat, False)
+stale = clock.pending
+def reopen(owner, value):
+    stale()  # Already dequeued when the new stock open starts.
+    assert native.events[-1] == 'set-done' and native.chat_document
+    return stock_set_focused(owner, value)
+assert state['_watch_focus'](reopen, before_open=True)(chat, True)
+new_tick = clock.pending
+native.events[:] = []
+stale()
+assert native.events == [] and clock.pending is new_tick
+assert change(chat, False)
+stale = clock.pending
 view.generation = 0
-state['_battle_owner'] = None
+state['_on_dispose'](chat)
+lobby_tick = clock.pending
+assert native.token == 0 and lobby_tick
+assert native.events[-2:] == ['end', 'attach']
+stale()
+assert clock.pending is lobby_tick and 'handoff' not in native.events
+
+# At entry the input manager may not yet exist. Retry once, before stock takes chat focus.
+chat.app = None
+native.chat_document = False  # Simulate the new battle's clean driving focus.
+state['_on_populate'](chat)
+assert state['_battle_baseline'] is None
+chat.app = chat
+state['_battle'] = view
+native.events[:] = []
+assert change(chat, True)
+assert native.events == ['baseline', 'enter', 'set-done', 'attach']
+assert change(chat, False)
+clock.run()
+assert change(chat, True)
+assert native.events.count('baseline') == 1
+
+# A failed retry is terminal for this battle. fini cancels the last pending handoff.
+state['_on_dispose'](chat)
+chat.opened = False
+chat.consumers.clear()
+native.events[:] = []
+def unavailable():
+    native.events.append('no-baseline')
+    return False
+native.ImeBattleBaseline = unavailable
+state['_on_populate'](chat)
+state['_battle'] = view
+for i in range(2):
+    assert change(chat, True) and change(chat, False)
+    if not i:
+        clock.run()
+assert native.events.count('no-baseline') == 2
+stale = clock.pending
+native.ImeStop = lambda: native.events.append('stop')
+state.update(_listening=False, _focus_hooks=[], BattleMessengerView=type('Hooks', (), {
+    '_populate': lambda self: None, '_dispose': lambda self: None}))
+state['fini']()
+assert native.events[-2:] == ['end', 'stop']
+native.events[:] = []
+stale()
+assert clock.pending is None and native.events == []
+
+# Expose an enabled, clean lobby fixture for the installed-client bytecode smoke.
+del native.ImeBattleBaseline
+native.chat_document = False
+state['_enabled'] = True
 state['_switch_route']()
 assert native.token == 0 and clock.pending
-print('Stock handoff, battle chat open/closed routing and candidate generations passed')
+print('Battle baseline, deferred handoff, stale events and candidate generations passed')
