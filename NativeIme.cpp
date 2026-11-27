@@ -5,6 +5,7 @@
 #endif
 #include "TextStore.h"
 #include "CandidateList.h"
+#include "BattleFocus.h"
 #include <array>
 #include <commctrl.h>
 #include <cstring>
@@ -26,12 +27,6 @@ struct Snapshot {
     Draft draft;
     std::array<int, 8> rects{};
 };
-
-struct ReleaseCom {
-    template<class T> void operator()(T* value) const { value->Release(); }
-};
-
-template<class T> using Com = std::unique_ptr<T, ReleaseCom>;
 
 struct CandidatePage {
     int selection = -1;
@@ -81,10 +76,6 @@ struct Busy {
     ~Busy();
 };
 
-template<class T> void release(T*& value) {
-    if (value) { auto* old = value; value = nullptr; old->Release(); }
-}
-
 #ifdef TEST_CANDIDATE_UI
 bool activeTsfFlags(DWORD& flags) {
     ITfThreadMgrEx* managerEx = nullptr;
@@ -108,7 +99,7 @@ Com<ITfCandidateListUIElement> ownedCandidate(ITfUIElement* element) {
         return {};
     Com<ITfCandidateListUIElement> candidate(raw);
     ITfDocumentMgr* owner = nullptr;
-    const bool ours = candidate->GetDocumentMgr(&owner) == S_OK && owner == s.document;
+    const bool ours = candidate->GetDocumentMgr(&owner) == S_OK && owner && sameCom(owner, s.document);
     release(owner);
     return ours ? std::move(candidate) : nullptr;
 }
@@ -129,6 +120,7 @@ bool readImmPage(const void* buffer, DWORD bytes, CandidatePage& page) {
     const DWORD first = list.dwPageStart;
     const auto rows = std::min({list.dwCount - list.dwPageStart, list.dwPageSize,
                                 static_cast<DWORD>(MaxCandidateRows)});
+    page.labels.reserve(rows);
     for (DWORD row = 0; row < rows; ++row) {
         DWORD offset = 0;
         std::memcpy(&offset, data + header + (first + row) * sizeof(DWORD), sizeof offset);
@@ -170,6 +162,7 @@ bool readCandidatePage(ITfCandidateListUIElement& list, CandidatePage& page) {
     UINT selected = 0;
     if (list.GetSelection(&selected) == S_OK && selected >= first && selected < last)
         page.selection = static_cast<int>(selected - first);
+    page.labels.reserve(last - first);
     for (UINT index = first; index < last; ++index) {
         BSTR text = nullptr;
         const HRESULT result = list.GetString(index, &text);
@@ -214,13 +207,6 @@ std::wstring compositionText(ITfContext* context, const TextStore& store) {
     return text.substr(first, length);
 }
 
-struct ImmContext {
-    HWND window;
-    HIMC handle;
-    explicit ImmContext(HWND window) : window(window), handle(ImmGetContext(window)) {}
-    ~ImmContext() { if (handle) ImmReleaseContext(window, handle); }
-};
-
 std::wstring immText(HIMC handle, DWORD kind) {
     if (!handle) return {};
     const LONG bytes = ImmGetCompositionStringW(handle, kind, nullptr, 0);
@@ -232,18 +218,6 @@ std::wstring immText(HIMC handle, DWORD kind) {
 }
 
 bool composing() { return s.store ? s.store->composing : s.immComposing; }
-
-bool sameCom(IUnknown* a, IUnknown* b) {
-    if (a == b) return true;
-    if (!a || !b) return false;
-    // A provider can return distinct interface pointers for the same COM object.
-    IUnknown *left = nullptr, *right = nullptr;
-    const bool same = SUCCEEDED(a->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&left))) &&
-                      SUCCEEDED(b->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&right))) && left == right;
-    release(left);
-    release(right);
-    return same;
-}
 
 void sampleCandidateUI() {
     CandidatePage next;
@@ -390,79 +364,13 @@ bool testCandidateUI(ITfThreadMgr* manager, ITfDocumentMgr* document, TextStore*
     return success;
 }
 #else
-HWND gameWindow() {
-    const HWND window = GetFocus();
-    if (!window || window != GetForegroundWindow() || GetWindow(window, GW_OWNER) ||
-        GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId() ||
-        GetClassLongPtrW(window, GCW_ATOM) == 32770) return nullptr; // Standard dialog class.
-    return window;
-}
-
 bool foreground() { return s.window && gameWindow() == s.window; }
 
-// A non-null window means we observed an empty TSF focus before stock chat opened.
-// Keep the two document identities alive across stop(), until this chat hands off.
-struct BattleChat {
-    Com<ITfDocumentMgr> plugin, chat;
-    Com<ITfContext> top, pluginBase;
-};
-struct BattleFocus {
-    HWND window = nullptr;
-    BattleChat round;
-};
 thread_local BattleFocus battle;
 
-Com<ITfThreadMgr> existingManager() {
-    const auto module = GetModuleHandleW(L"msctf.dll");
-    using GetManager = HRESULT (WINAPI *)(ITfThreadMgr**);
-    const auto get = module ? reinterpret_cast<GetManager>(reinterpret_cast<void*>(
-        GetProcAddress(module, "TF_GetThreadMgr"))) : nullptr;
-    ITfThreadMgr* manager = nullptr;
-    if (get) get(&manager);
-    return Com<ITfThreadMgr>(manager);
-}
-
-void ImeBattleEnd() { battle = {}; }
-
-bool ImeBattleBaseline() {
-    ImeBattleEnd();
-    const HWND window = gameWindow();
-    if (!window || s.busy || s.thread || ImmContext(window).handle) return false;
-    const auto manager = existingManager();
-    ITfDocumentMgr* current = nullptr;
-    const bool empty = manager && SUCCEEDED(manager->GetFocus(&current)) && !current;
-    release(current);
-    if (empty) battle.window = window;
-    return empty;
-}
-
-const char* ImeBattleHandoff() {
-    const auto round = std::move(battle.round);
-    if (!battle.window) return "no-baseline";
-    if (!round.plugin) return "no-attachment";
-    if (s.busy || s.thread || !s.gameplayActive) return "not-released";
-    if (gameWindow() != battle.window) return "window-changed";
-    if (ImmContext(battle.window).handle) return "host-himc";
-    const auto manager = existingManager();
-    ITfDocumentMgr* current = nullptr;
-    if (!manager || FAILED(manager->GetFocus(&current))) return "focus-unavailable";
-    const Com<ITfDocumentMgr> focused(current);
-    if (!current) return "already-clear";
-    const bool ours = sameCom(current, round.plugin.get());
-    if (!ours && !sameCom(current, round.chat.get())) return "foreign";
-    ITfContext* top = nullptr;
-    const HRESULT result = current->GetTop(&top);
-    const Com<ITfContext> context(top);
-    // Some TSF providers expose a default top on an otherwise empty document.
-    if (FAILED(result) || !sameCom(top, ours ? round.pluginBase.get() : round.top.get())) return "foreign-context";
-    if (FAILED(manager->SetFocus(nullptr))) return "restore-failed";
-    ITfDocumentMgr* after = nullptr;
-    const HRESULT readBack = manager->GetFocus(&after);
-    const Com<ITfDocumentMgr> observed(after);
-    if (FAILED(readBack)) return "restore-unconfirmed";
-    if (after) return "focus-replaced";
-    return ours ? "restored-plugin" : "restored-chat";
-}
+void ImeBattleEnd() { battle.endBattle(); }
+bool ImeBattleBaseline() { return battle.observeBaseline([] { return s.busy || s.thread; }); }
+const char* ImeBattleHandoff() { return battle.handoff(!s.busy && !s.thread && s.gameplayActive); }
 
 void clearImmCandidates();
 
@@ -498,7 +406,7 @@ void detach() {
     }
     if (s.document && s.manager) {
         ITfDocumentMgr* current = nullptr;
-        if (SUCCEEDED(s.manager->GetFocus(&current)) && current == s.document)
+        if (SUCCEEDED(s.manager->GetFocus(&current)) && current && sameCom(current, s.document))
             s.manager->SetFocus(s.previous);
         release(current);
     }
@@ -518,28 +426,10 @@ bool attachTsf() {
     locate();
     TfEditCookie cookie;
     if (FAILED(s.manager->CreateDocumentMgr(&s.document))) return false;
-    const bool inBattle = battle.window && battle.window == s.window;
-    ITfContext* base = nullptr;
-    if (inBattle) s.document->GetTop(&base);
-    Com<ITfContext> pluginBase(base);
+    auto pluginBase = battle.beforePush(s.window, s.document);
     if (FAILED(s.document->CreateContext(s.client, 0, static_cast<ITextStoreACP*>(s.store), &s.context, &cookie)) ||
         FAILED(s.document->Push(s.context)) || FAILED(s.manager->GetFocus(&s.previous))) return false;
-    const bool first = battle.window == s.window && !battle.round.plugin;
-    ITfContext* top = nullptr;
-    const bool identified = first && s.previous && SUCCEEDED(s.previous->GetTop(&top));
-    Com<ITfContext> chatTop(top);
-    if (FAILED(s.manager->SetFocus(s.document))) return false;
-    if (battle.window && battle.window == s.window) {
-        if (identified) {
-            s.previous->AddRef();
-            battle.round.chat.reset(s.previous);
-            battle.round.top = std::move(chatTop);
-        }
-        s.document->AddRef();
-        battle.round.plugin.reset(s.document);
-        battle.round.pluginBase = std::move(pluginBase);
-    }
-    return true;
+    return battle.focusPlugin(s.window, s.manager, s.document, s.previous, std::move(pluginBase));
 }
 
 enum class InputRoute { Stock, Tsf, Imm };
@@ -649,12 +539,10 @@ void syncAttachment() {
     const auto route = activeRoute(keyboard);
     if (route == InputRoute::Stock) { detach(); s.attachFailed = false; return; }
     const bool imm = route == InputRoute::Imm;
-    const bool draftChangedDuringComposition = s.token && (s.immComposing || (s.store && s.store->composing)) &&
-                                               !(s.base == s.sample.draft) && s.token == s.sample.token;
+    const bool draftChanged = s.token == s.sample.token && !(s.base == s.sample.draft);
     if (s.token && (s.token != s.sample.token || s.keyboard != keyboard || s.imm != imm ||
-                    draftChangedDuringComposition)) detach();
-    const bool newField = !s.token;
-    if (newField) {
+                    (draftChanged && (s.immComposing || (s.store && s.store->composing))))) detach();
+    if (!s.token) {
         s.base = s.sample.draft;
         s.keyboard = keyboard;
         s.imm = imm;
@@ -666,7 +554,7 @@ void syncAttachment() {
         }
         s.attachFailed = false;
         if (imm) DefWindowProcW(s.window, WM_IME_SETCONTEXT, TRUE, ISC_SHOWUIALL & ~ISC_SHOWUICOMPOSITIONWINDOW);
-    } else if (!(s.base == s.sample.draft)) {
+    } else if (draftChanged) {
         s.base = s.sample.draft;
         if (s.store) s.store->updateDraft(s.base);
     }
@@ -911,7 +799,7 @@ void handleQueuedIme(MSG& msg) {
 
 LRESULT CALLBACK wndProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR) {
     if (message == WM_NCDESTROY) {
-        if (battle.window == window) ImeBattleEnd();
+        battle.windowDestroyed(window);
         if (!s.busy) { Busy busy; detach(); }
         RemoveWindowSubclass(window, wndProc, id);
         s.window = nullptr;
@@ -1005,7 +893,7 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
     if (s.hook && s.window && (!window || window == s.window)) return 1;
     Busy busy;
     if (s.thread) stop();
-    battle.round = {};
+    battle.beginChat();
     s.gameplayActive = false;
     if (!window || !refresh || !commitCallback) return 0;
     initialize(window);

@@ -29,13 +29,16 @@ package {
             var limit:Number = Math.max(24, screen.width - 8);
             if (layoutLimit != limit) layout(limit);
             var scale:Number = Math.min(1, screen.width / panelWidth, screen.height / panelHeight);
-            scaleX = scaleY = scale;
+            if (scaleX != scale) scaleX = scale;
+            if (scaleY != scale) scaleY = scale;
             var w:Number = panelWidth * scale, h:Number = panelHeight * scale;
             var panelY:Number = caret.bottom + 4;
             if (panelY + h > screen.height && caret.top - 4 >= h) panelY = caret.top - 4 - h;
-            x = Math.max(0, Math.min(caret.left, screen.width - w));
-            y = Math.max(0, Math.min(panelY, screen.height - h));
-            if (parent && parent.getChildIndex(this) != parent.numChildren - 1)
+            var nextX:Number = Math.max(0, Math.min(caret.left, screen.width - w));
+            var nextY:Number = Math.max(0, Math.min(panelY, screen.height - h));
+            if (x != nextX) x = nextX;
+            if (y != nextY) y = nextY;
+            if (parent && parent.getChildAt(parent.numChildren - 1) !== this)
                 parent.setChildIndex(this, parent.numChildren - 1);
         }
 

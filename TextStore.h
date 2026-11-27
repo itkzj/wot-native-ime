@@ -1,6 +1,5 @@
 #pragma once
-#include <windows.h>
-#include <msctf.h>
+#include "ImePlatform.h"
 #include <textstor.h>
 #include <olectl.h>
 #include <algorithm>
@@ -70,20 +69,16 @@ public:
         ITextStoreACPSink* next = nullptr;
         const HRESULT result = object->QueryInterface(__uuidof(ITextStoreACPSink), reinterpret_cast<void**>(&next));
         if (FAILED(result)) return result;
-        if (sink && sink != next) { next->Release(); return CONNECT_E_ADVISELIMIT; }
+        if (!next) return E_NOINTERFACE;
+        if (sink && !sameCom(sink, next)) { next->Release(); return CONNECT_E_ADVISELIMIT; }
         if (sink) sink->Release();
         sink = next;
         mask = flags;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE UnadviseSink(IUnknown* object) override {
-        if (!sink || !object) return CONNECT_E_NOCONNECTION;
-        ITextStoreACPSink* current = nullptr;
-        if (FAILED(object->QueryInterface(__uuidof(ITextStoreACPSink), reinterpret_cast<void**>(&current))))
-            return CONNECT_E_NOCONNECTION;
-        current->Release();
-        if (current != sink) return CONNECT_E_NOCONNECTION;
-        current = sink;
+        if (!sink || !sameCom(sink, object)) return CONNECT_E_NOCONNECTION;
+        auto* current = sink;
         sink = nullptr;
         mask = 0;
         current->Release();

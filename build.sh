@@ -17,6 +17,7 @@ cxx=${CXX:-'/d/Protable Files/mingw64/bin/g++.exe'}
     -o build/_wot_native_ime.pyd -lpython27 -lole32 -loleaut32 -luuid -lcomctl32 -limm32
 "$python" -B -S test_mod_paths.py
 "$python" -B -S test_bridge_route.py
+"$python" -B -S test_client_chat_close.py "$(dirname -- "$1")/scripts.pkg"
 "$python" -S test_native_module.py
 "$cxx" -std=c++17 -Wall -Wextra -Werror -O2 -static -DTEST_CANDIDATE_UI test_text_store.cpp NativeIme.cpp \
     -o build/test_text_store.exe -lole32 -loleaut32 -luuid -limm32

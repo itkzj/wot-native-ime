@@ -135,11 +135,17 @@ int main() {
     assert(ImmAssociateContext(window, nullptr) == chatContext);
     assert(SUCCEEDED(host->SetFocus(nullptr)));
     assert(ImeBattleBaseline());
-    const auto closeChat = [&] {
+    const auto closeChat = [&](bool reattach = false) {
         assert(SUCCEEDED(host->SetFocus(windowDoc)));
         assert(ImeStart([] {}, [](unsigned, const wchar_t*, int, int, int, const wchar_t*, int, int, int) { return 0; }));
         s.token = 1;
         assert(attachTsf());
+        if (reattach) {
+            detach();
+            assert(SUCCEEDED(host->SetFocus(gameplay)));
+            s.token = 2;
+            assert(attachTsf());
+        }
         ITfDocumentMgr* plugin = nullptr;
         assert(SUCCEEDED(host->GetFocus(&plugin)) && plugin == s.document);
         assert(ImeGameplay()); // The original close handler can still run after this detach.
@@ -166,6 +172,13 @@ int main() {
         expectHandoff("restored-plugin");
         expectFocus(nullptr);
     }
+    closeChat(true);
+    expectFocus(gameplay);
+    expectHandoff("foreign"); // The intermediate focus must not replace the original stock chat.
+    closeChat(true);
+    assert(SUCCEEDED(host->SetFocus(windowDoc)));
+    expectHandoff("restored-chat");
+    expectFocus(nullptr);
     closeChat();
     assert(SUCCEEDED(host->SetFocus(gameplay)));
     assert(std::string(ImeBattleHandoff()) == "foreign");

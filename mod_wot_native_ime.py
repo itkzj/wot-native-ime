@@ -60,14 +60,15 @@ def _active():
 
 def _refresh():
     global _binding, _token
+    epoch = _route_epoch
     try:
         view = _active()
         obj = view.flashObject if _enabled and view is not None else None
         if obj and _battle_owner is not None and (_gameplay_owner is _battle_owner or not _battle_owner.isFocused()):
-            _binding = None
-            _library.ImeClear()
-            return
+            obj = None
         snapshot = obj.as_snapshot() if obj else None
+        if epoch != _route_epoch:
+            return  # Flash can synchronously change the route while sampling.
         if snapshot is not None:
             if len(snapshot) != 13:
                 raise ValueError('Unexpected Scaleform snapshot')
@@ -83,6 +84,8 @@ def _refresh():
                 return
     except Exception:
         _error('Could not sample the original field')
+        if epoch != _route_epoch:
+            return
     _binding = None
     _library.ImeClear()
 
@@ -124,10 +127,11 @@ def _update_candidates(view, page):
         _error('Could not update the candidate panel')
 
 
-def _tick(closing=False):
+def _tick(epoch, closing=False):
     global _tick_id, _status, _binding, _gameplay_owner
+    if epoch != _route_epoch:
+        return  # A callback can already be dequeued when its route is cancelled.
     _tick_id = None
-    epoch = _route_epoch
     view = _active()
     if _enabled and _battle_owner is not None:
         if closing or not _battle_owner.isFocused():
@@ -156,6 +160,8 @@ def _tick(closing=False):
         attached = _library.ImeStart(_refresh, _commit)
         if attached:
             _library.ImeTick()
+        if epoch != _route_epoch:
+            return
         status = _library.ImeStatus()
         page = _library.ImeCandidates() if attached and status in (2, 3) else _EMPTY_CANDIDATES
         _update_candidates(view, page)
@@ -166,7 +172,7 @@ def _tick(closing=False):
         _error('Native input host unavailable')
         attached = False
     if epoch == _route_epoch and _enabled:
-        _tick_id = BigWorld.callback(0.016 if attached else 0.25, _tick)
+        _tick_id = BigWorld.callback(0.016 if attached else 0.25, lambda: _tick(epoch))
 
 
 def _cancel_route():
@@ -179,7 +185,9 @@ def _cancel_route():
 
 def _switch_route(closing=False):
     _cancel_route()
-    _tick(closing)
+    epoch = _route_epoch
+    _tick(epoch, closing)
+    return epoch
 
 
 class NativeImeView(View):
@@ -196,7 +204,8 @@ class NativeImeView(View):
                 _battle = self
             else:
                 _lobby = self
-            _switch_route()
+            if self is _active() and _gameplay_owner is None:
+                _switch_route()
         except Exception:
             _error('Could not initialize Scaleform input bridge')
 
@@ -296,8 +305,7 @@ def _watch_focus(original, before_open=False):
                 else:
                     _battle_baseline = False
             if not value and _gameplay_owner is not view:
-                close_epoch = _route_epoch + 1
-                _switch_route(closing=True)
+                close_epoch = _switch_route(closing=True)
             result = original(view, value)
             completed = True
             return result
@@ -306,7 +314,7 @@ def _watch_focus(original, before_open=False):
             if outer is not view and _enabled and _battle_owner is view and _gameplay_owner is view:
                 if (completed or not value) and view.isFocused():
                     _switch_route()
-                elif completed and close_epoch == _route_epoch:
+                elif completed and _battle_baseline and close_epoch == _route_epoch:
                     _queue_handoff(view, close_epoch)
     return changed
 
@@ -332,8 +340,7 @@ def _on_populate(view):
         if _battle_owner is not None:
             _end_battle()
         _battle_owner, _battle, _binding = view, None, None
-        entry_epoch = _route_epoch + 1
-        _switch_route()
+        entry_epoch = _switch_route()
         if _battle_owner is view and entry_epoch == _route_epoch and _gameplay_owner is view:
             _capture_baseline(view, True)
         try:
@@ -372,8 +379,9 @@ def init():
 
 
 def fini():
-    global _enabled, _listening, _tick_id, _binding
+    global _enabled, _listening, _binding
     _enabled = False
+    _cancel_route()
     if _battle_owner is not None:
         _end_battle()
     _binding = None
@@ -384,9 +392,6 @@ def fini():
         current = getattr(BattleMessengerView, name)
         if getattr(current, 'im_func', current) is hook:
             setattr(BattleMessengerView, name, original)
-    if _tick_id is not None:
-        BigWorld.cancelCallback(_tick_id)
-        _tick_id = None
     if _library is not None:
         _library.ImeStop()
     _update_candidates(None, _EMPTY_CANDIDATES)

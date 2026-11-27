@@ -57,7 +57,42 @@ struct Candidate final : ITfCandidateListUIElement {
     HRESULT STDMETHODCALLTYPE GetCurrentPage(UINT* page) override { *page = 1; return S_OK; }
 };
 
+// Two sink interfaces may have different addresses while sharing one IUnknown.
+struct SinkAlias final : ITextStoreACPSink {
+    SinkAlias* identity = this;
+    ULONG refs = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (iid == IID_IUnknown) *out = static_cast<IUnknown*>(identity);
+        else if (iid == __uuidof(ITextStoreACPSink)) *out = static_cast<ITextStoreACPSink*>(this);
+        else { *out = nullptr; return E_NOINTERFACE; }
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++identity->refs; }
+    ULONG STDMETHODCALLTYPE Release() override { return --identity->refs; }
+    HRESULT STDMETHODCALLTYPE OnTextChange(DWORD, const TS_TEXTCHANGE*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnSelectionChange() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnLayoutChange(TsLayoutCode, TsViewCookie) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnStatusChange(DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnAttrsChange(LONG, LONG, ULONG, const TS_ATTRID*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnLockGranted(DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnStartEditTransaction() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnEndEditTransaction() override { return S_OK; }
+};
+
 int main() {
+    _set_error_mode(_OUT_TO_STDERR);
+    {
+        TextStore store(nullptr, {});
+        SinkAlias first, alias, foreign;
+        alias.identity = &first;
+        assert(store.AdviseSink(__uuidof(ITextStoreACPSink), &first, 0) == S_OK);
+        assert(store.AdviseSink(__uuidof(ITextStoreACPSink), &alias, 0) == S_OK);
+        assert(store.AdviseSink(__uuidof(ITextStoreACPSink), &foreign, 0) == CONNECT_E_ADVISELIMIT);
+        assert(store.UnadviseSink(&foreign) == CONNECT_E_NOCONNECTION);
+        assert(store.UnadviseSink(&first) == S_OK);
+        assert(first.refs == 1 && foreign.refs == 1);
+    }
     // CANDIDATELIST with three UTF-16 entries and a second page starting at index 1.
     DWORD imm[] = {48, 0, 3, 2, 1, 2, 36, 40, 44, 'a', 0x4f60, 0x597d};
     assert(testImmCandidatePage(imm, sizeof imm, true));

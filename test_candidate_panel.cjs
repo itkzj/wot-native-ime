@@ -21,8 +21,20 @@ const panel = {
     separatorY: NaN, highlightHeight: NaN, highlightY: NaN, x: 0, y: 0, scaleX: 1, scaleY: 1,
     get numChildren() { return rows.length; }, getChildAt: i => rows[i],
     addChild: row => rows.push(row), removeChildAt: i => rows.splice(i, 1),
-    parent: {numChildren: 1, getChildIndex(child) { assert.equal(child, panel); return 0; }},
+    parent: {
+        numChildren: 2, top: null, raises: 0,
+        getChildIndex(child) { return child === this.top ? 1 : 0; },
+        getChildAt(index) { assert.equal(index, 1); return this.top; },
+        setChildIndex(child, index) { assert.equal(index, 1); this.top = child; this.raises++; },
+    },
 };
+let transformWrites = 0;
+for (const key of ['x', 'y', 'scaleX', 'scaleY']) {
+    let value = panel[key];
+    Object.defineProperty(panel, key, {
+        get() { return value; }, set(next) { value = next; transformWrites++; },
+    });
+}
 for (const method of ['layout', 'paint', 'position', 'showPage']) {
     const signature = `function ${method}(`;
     const start = source.indexOf(signature);
@@ -44,6 +56,12 @@ assert.equal(writes, 249);
 assert.deepEqual(paints, [[100, 226, 25, 22]]);
 assert.equal(panel.x, 700);
 assert.equal(panel.y, 170);
+assert.equal(transformWrites, 2, 'stable geometry only writes the initial x and y');
+assert.equal(panel.parent.raises, 1);
+panel.parent.top = {};
+panel.position(screen, caret);
+assert.equal(panel.parent.top, panel);
+assert.equal(panel.parent.raises, 2);
 panel.showPage(['甲', '乙'], 1, '', screen, caret);
 assert.deepEqual(rows.map(row => row.text), ['1. 甲', '2. 乙']);
 assert.deepEqual(paints.at(-1), [100, 50, 25, 22]);
@@ -54,4 +72,8 @@ assert.equal(rows[0].wordWrap, true);
 assert.deepEqual(paints.at(-1), [92, 42, 0, 0]);
 panel.position(screen, caret);
 assert.equal(rows[0].wordWrap, false);
-console.log('Candidate panel replay passed: 240 updates, 10 fields, 249 text writes and 1 paint during typing');
+panel.position({width: 40, height: 10}, {left: 0, top: 0, bottom: 0});
+assert.ok(panel.scaleX < 1 && panel.scaleX === panel.scaleY);
+panel.position(screen, {left: 10, top: 40, bottom: 60});
+assert.deepEqual([panel.x, panel.y, panel.scaleX, panel.scaleY], [10, 64, 1, 1]);
+console.log('Candidate panel replay passed: 240 updates, 10 fields, 249 text writes, 1 paint, 2 transform writes at fixed geometry');

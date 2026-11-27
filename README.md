@@ -21,8 +21,8 @@
 
 ## 构建
 
-在 Windows MSYS Bash 中运行 `bash build.sh E:/Games/World_of_Tanks_CN/res/packages/gui-part3.pkg`，按本机安装位置替换参数。构建从该客户端定位 `paths.xml` 和散装候选资源 `res/gui/flash/ime.swf`，使用工作区已有的 Flex、Temurin 21、Python 2.7 和 x64 MinGW。输出在 `dist/` 下。脚本会运行 Windows TSF、消息路由和包内容校验。
+在 Windows MSYS Bash 中运行 `bash build.sh E:/Games/World_of_Tanks_CN/res/packages/gui-part3.pkg`，按本机安装位置替换参数。构建从该客户端定位 `paths.xml` 和散装候选资源 `res/gui/flash/ime.swf`，使用工作区已有的 Flex、Temurin 21、Python 2.7 和 x64 MinGW。输出在 `dist/` 下。脚本会从同目录的 `scripts.pkg` 加载原版聊天方法，回放三轮开关，并运行 Windows TSF、消息路由和包内容校验。Flash 事件与车辆控制端点由测试模拟。
 
-候选面板的快打回放可单独运行 `node test_candidate_panel.cjs`。它检查连续更新时的文本框复用、背景绘制次数、换行和贴边定位。
+候选面板的快打回放可单独运行 `node test_candidate_panel.cjs`。它检查连续更新时的文本框复用、背景绘制与位置属性写入次数，以及换行、缩放和贴边定位。
 
 本项目源码采用 [GPL-3.0](LICENSE)。客户端美术和原版输入法资源来自本机游戏安装。
