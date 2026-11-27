@@ -56,57 +56,40 @@ int main() {
     assert(SUCCEEDED(s.manager->CreateDocumentMgr(&gameplay)));
     assert(SUCCEEDED(s.manager->AssociateFocus(window, windowDoc, &prior)));
     assert(SUCCEEDED(s.manager->SetFocus(gameplay)));
-    // Exercise the normal closed-chat route without an input profile lookup.
+    ITfThreadMgr* host = s.manager;
+    host->AddRef();
+    TfClientId hostId = 0;
+    assert(SUCCEEDED(host->Activate(&hostId)));
     const HIMC chatContext = ImmContext(window).handle;
     assert(chatContext);
-    s.refresh = [] { s.sample.gameplay = true; };
-    s.swallowed['W'] = true;
-    MSG releaseW{window, WM_KEYUP, 'W', 1, 0, {0, 0}};
-    handleKey(releaseW);
-    assert(releaseW.message == WM_KEYUP && releaseW.wParam == 'W');
-    assert(s.gameplayActive && !s.store && s.context && !ImmContext(window).handle);
-    ITfCompartmentMgr* compartments = nullptr;
-    assert(SUCCEEDED(s.context->QueryInterface(IID_PPV_ARGS(&compartments))));
-    for (const GUID* id : {&GUID_COMPARTMENT_KEYBOARD_DISABLED, &GUID_COMPARTMENT_EMPTYCONTEXT}) {
-        ITfCompartment* value = nullptr;
-        VARIANT flag{};
-        assert(SUCCEEDED(compartments->GetCompartment(*id, &value)));
-        assert(value->GetValue(&flag) == S_OK && flag.vt == VT_I4 && flag.lVal == 1);
-        value->Release();
+    s.token = 1;
+    assert(attachTsf());
+    {
+        Busy nestedCallback;
+        assert(!ImeGameplay());
     }
-    compartments->Release();
+    assert(ImeGameplay() && ImeStatus() == 5 && s.suspendedKeys && !s.hook);
+    DWORD_PTR subclassData = 0;
+    // comctl32 v5 exposes GetWindowSubclass by ordinal on this Windows version.
+    const auto getSubclass = reinterpret_cast<decltype(&GetWindowSubclass)>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"comctl32.dll"), MAKEINTRESOURCEA(411))));
+    assert(getSubclass && !getSubclass(window, wndProc, SubclassId, &subclassData));
+    assert(!ImmContext(window).handle);
     ITfDocumentMgr* restored = nullptr;
-    assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == s.document);
+    assert(SUCCEEDED(host->GetFocus(&restored)) && restored == gameplay);
     release(restored);
-    const auto disabledDocument = s.document;
     for (WPARAM key : {WPARAM('W'), WPARAM('A'), WPARAM('S'), WPARAM('D'), WPARAM(VK_SHIFT), WPARAM(VK_RETURN)}) {
         for (UINT message : {WM_KEYDOWN, WM_KEYUP}) {
-            MSG event{window, message, key, 1, 0, {0, 0}};
-            handleKey(event);
-            assert(event.message == message && event.wParam == key && event.lParam == 1);
+            const LPARAM bits = message == WM_KEYDOWN ? 1 : 0xc0000001u;
+            assert(PostMessageW(window, message, key, bits));
+            MSG event{};
+            assert(GetMessageW(&event, window, message, message) > 0);
+            assert(event.wParam == key && event.lParam == bits && DispatchMessageW(&event) == stock);
         }
     }
-    assert(ImeStatus() == 5);
-    MSG unknownScan{window, WM_KEYDOWN, VK_PROCESSKEY, 1, 0, {0, 0}};
-    handleKey(unknownScan);
-    assert(unknownScan.wParam == VK_PROCESSKEY && ImeStatus() == 5);
-    // Replay the battle trace: the physical scan code survives, but Windows
-    // gives the application VK_PROCESSKEY while Chinese input is active.
-    for (const wchar_t key : std::wstring(L"WASD")) {
-        const UINT scan = MapVirtualKeyW(key, MAPVK_VK_TO_VSC);
-        assert(scan);
-        for (UINT message : {WM_KEYDOWN, WM_KEYUP}) {
-            const LPARAM flags = 1 | (scan << 16) | (message == WM_KEYUP ? 0xc0000000u : 0u);
-            MSG event{window, message, VK_PROCESSKEY, flags, 0, {0, 0}};
-            getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&event));
-            assert(event.message == message && event.wParam == key && event.lParam == flags);
-            assert(DispatchMessageW(&event) == stock);
-        }
-    }
-    assert(ImeStatus() == 6 && s.document == disabledDocument && !ImmContext(window).handle);
-    s.refresh = [] {}; // Chat reopens with a stock-supported input method.
-    sync();
-    assert(!s.gameplayActive && ImmContext(window).handle == chatContext);
+    assert(ImeStart([] {}, [](unsigned, const wchar_t*, int, int, int, const wchar_t*, int, int, int) { return 0; }));
+    assert(s.hook && !s.gameplayActive && !s.suspendedKeys && ImmContext(window).handle == chatContext);
+    assert(getSubclass(window, wndProc, SubclassId, &subclassData));
     assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == gameplay);
     release(restored);
     s.token = 1;
@@ -138,6 +121,12 @@ int main() {
     release(windowDoc);
     ImeStop();
     assert(ImeStatus() == 0);
+
+    assert(ImeGameplay() && !s.hook && s.suspendedKeys && !ImmContext(window).handle);
+    ImeStop();
+    assert(ImmContext(window).handle == chatContext && ImeStatus() == 0);
+    host->Deactivate();
+    host->Release();
 
     std::wstring longText(1024, L'x');
     int rects[] = {20, 20, 20, 40, 10, 10, 100, 100};

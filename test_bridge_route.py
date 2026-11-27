@@ -28,6 +28,20 @@ class Native(object):
 
     def ImeGameplay(self):
         self.token = 'gameplay'
+        return True
+
+    def ImeStart(self, refresh, commit):
+        self.refresh = refresh
+        return True
+
+    def ImeTick(self):
+        self.refresh()
+
+    def ImeStatus(self):
+        return 2 if self.token else 1
+
+    def ImeCandidates(self):
+        return (-1, [], u'')
 
     def ImeClear(self):
         self.token = 0
@@ -41,7 +55,7 @@ with open('mod_wot_native_ime.py', 'rb') as source:
     module = compile(source.read(), source.name, 'exec')
 for code in module.co_consts:
     if isinstance(code, types.CodeType) and code.co_name in (
-            '_active', '_refresh', '_commit', '_update_candidates', '_text'):
+            '_active', '_refresh', '_commit', '_update_candidates', '_text', '_watch_focus', '_switch_route', '_tick'):
         state[code.co_name] = types.FunctionType(code, state)
 refresh, commit, candidates = (state[key] for key in ('_refresh', '_commit', '_update_candidates'))
 edit = (u'a', 1, 1, False, u'ab', 2, 2, False)
@@ -76,20 +90,36 @@ class BattleChat(object):
         return self.opened
 
 
+class Clock(object):
+    pending = None
+
+    def callback(self, delay, callback):
+        assert self.pending is None
+        self.pending = callback
+        return 1
+
+    def cancelCallback(self, handle):
+        assert handle == 1 and self.pending
+        self.pending = None
+
+
+clock = Clock()
 chat = BattleChat()
-state.update(_battle_owner=chat, _battle=view)
-refresh()  # Includes a stale Flash snapshot on the first frame after chat closes.
-assert native.token == 'gameplay' and state['_binding'] is None
-chat.opened = True
-refresh()
-assert native.token and native.token != 'gameplay' and commit(native.token, *edit)
+state.update(_battle_owner=chat, _battle=view, BigWorld=clock, _status=None, _tick_id=None, _route_epoch=0,
+             _status_labels={1: 'stock', 2: 'editing', 5: 'direct'})
+change = state['_watch_focus'](lambda owner, value: setattr(owner, 'opened', value))
+state['_switch_route']()  # Enter battle with chat closed, even with a stale Flash snapshot.
+assert native.token == 'gameplay' and state['_binding'] is None and clock.pending is None
+change(chat, True)
+assert clock.pending and native.token != 'gameplay' and commit(native.token, *edit)
 view.generation = 0
 refresh()  # Open chat that is being handled by the stock input method.
 assert native.token == 0
-chat.opened = False
-refresh()
-assert native.token == 'gameplay'
+change(chat, False)
+assert native.token == 'gameplay' and clock.pending is None
+change(chat, True)
+assert native.token == 0 and clock.pending
 state['_battle_owner'] = None
-refresh()
-assert native.token == 0
+state['_switch_route']()
+assert native.token == 0 and clock.pending
 print('Stock handoff, battle chat open/closed routing and candidate generations passed')

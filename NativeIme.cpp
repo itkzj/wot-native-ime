@@ -5,12 +5,14 @@
 #endif
 #include "TextStore.h"
 #include "CandidateList.h"
+#include "ThreadManager2.h"
 #include <array>
 #include <commctrl.h>
 #include <cstring>
 #include <imm.h>
 #include <memory>
 #include <new>
+#include <utility>
 #include <vector>
 
 using Refresh = void (WINAPI*)();
@@ -21,7 +23,6 @@ constexpr UINT_PTR SubclassId = 1;
 constexpr unsigned ImeKeyCount = 256;
 
 struct Snapshot {
-    bool gameplay = false;
     unsigned token = 0;
     Draft draft;
     std::array<int, 8> rects{};
@@ -42,8 +43,9 @@ struct CandidatePage {
 struct State {
     DWORD thread = 0;
     HWND window = nullptr;
+    enum class Transition { None, Gameplay, Stop } pending = Transition::None;
     bool gameplayActive = false;
-    bool restoredGameplayKey = false;
+    ITfThreadMgr2* suspendedKeys = nullptr;
     HIMC previousImm = nullptr;
     HHOOK hook = nullptr;
     Refresh refresh = nullptr;
@@ -404,7 +406,7 @@ bool foreground() { return s.window && gameWindow() == s.window; }
 void clearImmCandidates();
 
 void detach() {
-    if (!s.token && !s.store && !s.document && !s.gameplayActive) return;
+    if (!s.token && !s.store && !s.document) return;
     s.token = 0;
     s.pendingImm = {};
     if (s.hiddenCandidate) {
@@ -439,13 +441,6 @@ void detach() {
             s.manager->SetFocus(s.previous);
         release(current);
     }
-    if (s.gameplayActive) {
-        s.gameplayActive = false;
-        // If the host has already associated a new HIMC, leave its choice in place.
-        if (s.previousImm && s.window && !ImmContext(s.window).handle)
-            ImmAssociateContext(s.window, s.previousImm);
-        s.previousImm = nullptr;
-    }
     release(s.previous);
     if (s.document) s.document->Pop(TF_POPF_ALL);
     release(s.context);
@@ -455,39 +450,16 @@ void detach() {
 
 void locate();
 
-bool focusDocument(IUnknown* owner) {
-    TfEditCookie cookie;
-    if (FAILED(s.manager->CreateDocumentMgr(&s.document)) ||
-        FAILED(s.document->CreateContext(s.client, 0, owner, &s.context, &cookie))) return false;
-    if (!owner) {
-        ITfCompartmentMgr* compartments = nullptr;
-        if (FAILED(s.context->QueryInterface(IID_PPV_ARGS(&compartments)))) return false;
-        VARIANT disabled{};
-        disabled.vt = VT_I4;
-        disabled.lVal = 1;
-        bool ok = true;
-        for (const GUID* id : {&GUID_COMPARTMENT_KEYBOARD_DISABLED, &GUID_COMPARTMENT_EMPTYCONTEXT}) {
-            ITfCompartment* compartment = nullptr;
-            ok = SUCCEEDED(compartments->GetCompartment(*id, &compartment)) &&
-                 SUCCEEDED(compartment->SetValue(s.client, &disabled));
-            release(compartment);
-            if (!ok) break;
-        }
-        release(compartments);
-        if (!ok) return false;
-    }
-    if (FAILED(s.document->Push(s.context))) return false;
-    // Window focus is already managed by the game. Borrow only TSF keyboard
-    // focus while this field is active; the HWND association can be different.
-    return SUCCEEDED(s.manager->GetFocus(&s.previous)) && SUCCEEDED(s.manager->SetFocus(s.document));
-}
-
 bool attachTsf() {
     if (!s.manager) return false;
     s.store = new (std::nothrow) TextStore(s.window, s.base);
     if (!s.store) return false;
     locate();
-    return focusDocument(static_cast<ITextStoreACP*>(s.store));
+    TfEditCookie cookie;
+    return SUCCEEDED(s.manager->CreateDocumentMgr(&s.document)) &&
+           SUCCEEDED(s.document->CreateContext(s.client, 0, static_cast<ITextStoreACP*>(s.store), &s.context, &cookie)) &&
+           SUCCEEDED(s.document->Push(s.context)) && SUCCEEDED(s.manager->GetFocus(&s.previous)) &&
+           SUCCEEDED(s.manager->SetFocus(s.document));
 }
 
 enum class InputRoute { Stock, Tsf, Imm };
@@ -587,7 +559,6 @@ void flushTsf() {
 }
 
 bool refreshSnapshot() {
-    s.sample.gameplay = false;
     s.sample.token = 0;
     if (foreground()) s.refresh();
     return s.sample.token && foreground();
@@ -623,21 +594,7 @@ void syncAttachment() {
 }
 
 void sync() {
-    const bool editing = refreshSnapshot();
-    if (!editing && s.sample.gameplay && foreground()) {
-        if (s.gameplayActive) return;
-        detach();
-        // Legacy IMEs use the HWND association even when TSF has no text store.
-        const HIMC previous = ImmAssociateContext(s.window, nullptr);
-        if (s.manager && !focusDocument(nullptr)) detach();
-        s.previousImm = previous;
-        s.gameplayActive = true;
-        s.restoredGameplayKey = false;
-        s.swallowed.fill(false);
-        return;
-    }
-    if (s.gameplayActive) detach();
-    if (editing) syncAttachment();
+    if (refreshSnapshot()) syncAttachment();
     else detach();
 }
 
@@ -651,20 +608,6 @@ void handleKey(MSG& msg) {
     // Check chat focus before consulting the IME or consuming a paired key-up.
     flushTsf();
     sync();
-    if (s.gameplayActive) {
-        // An IME can already have replaced the VK by the time we see the MSG.
-        // Recover it on the existing message; its repeat and release flags survive.
-        if (msg.wParam == VK_PROCESSKEY) {
-            UINT scan = (static_cast<DWORD>(msg.lParam) >> 16) & 0xff;
-            if (scan && (msg.lParam & (1L << 24))) scan |= 0xe000;
-            const UINT key = scan ? MapVirtualKeyW(scan, MAPVK_VSC_TO_VK) : 0;
-            if (key && key != VK_PROCESSKEY) {
-                msg.wParam = key;
-                s.restoredGameplayKey = true;
-            }
-        }
-        return;
-    }
     const auto originalKey = msg.wParam;
     const auto key = originalKey == VK_PROCESSKEY ? ImmGetVirtualKey(s.window) : originalKey;
     const bool tracked = key < ImeKeyCount;
@@ -774,6 +717,9 @@ void captureImmResult() {
     if (kept + pending.text.size() + text.size() <= TextStore::Capacity) pending.text += text;
 }
 
+bool ImeGameplay();
+void WINAPI ImeStop();
+
 Busy::~Busy() {
     if (!previous && !s.pendingImm.text.empty()) {
         try {
@@ -795,6 +741,11 @@ Busy::~Busy() {
         } catch (...) { detach(); }
     }
     s.busy = previous;
+    if (!previous) {
+        const auto next = std::exchange(s.pending, State::Transition::None);
+        if (next == State::Transition::Stop) ImeStop();
+        else if (next == State::Transition::Gameplay) ImeGameplay();
+    }
 }
 
 DWORD filterCandidateNotification(WPARAM notification, DWORD mask) {
@@ -916,7 +867,12 @@ void stop() {
     if (s.hook) UnhookWindowsHookEx(s.hook);
     s.hook = nullptr;
     detach();
-    if (s.window) RemoveWindowSubclass(s.window, wndProc, SubclassId);
+    if (s.gameplayActive) {
+        if (s.previousImm && GetWindowThreadProcessId(s.window, nullptr) == s.thread && !ImmContext(s.window).handle)
+            ImmAssociateContext(s.window, s.previousImm);
+        if (s.suspendedKeys) s.suspendedKeys->ResumeKeystrokeHandling();
+        release(s.suspendedKeys);
+    } else if (s.window) RemoveWindowSubclass(s.window, wndProc, SubclassId);
     release(s.keys);
     release(s.profiles);
     if (s.activated) s.manager->Deactivate();
@@ -927,18 +883,9 @@ void stop() {
     s.busy = busy;
 }
 
-int ImeStart(Refresh refresh, Commit commitCallback) {
-    if (s.busy) return 0;
-    HWND window = gameWindow();
-    if (s.hook && s.window && (!window || window == s.window)) return 1;
-    Busy busy;
-    if (s.hook) stop();
-    if (!window || !refresh || !commitCallback) return 0;
-    const DWORD thread = GetCurrentThreadId();
+void initialize(HWND window) {
+    s.thread = GetCurrentThreadId();
     s.window = window;
-    s.thread = thread;
-    s.refresh = refresh;
-    s.commit = commitCallback;
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     s.coInitialized = SUCCEEDED(co);
     if (s.coInitialized || co == RPC_E_CHANGED_MODE) {
@@ -955,8 +902,46 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
         CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr, CLSCTX_INPROC_SERVER,
                          __uuidof(ITfInputProcessorProfileMgr), reinterpret_cast<void**>(&s.profiles));
     }
+}
+
+bool ImeGameplay() {
+    if (s.busy) {
+        s.pending = State::Transition::Gameplay;
+        return false;
+    }
+    Busy busy;
+    const HWND window = gameWindow();
+    if (s.gameplayActive && window && window == s.window) return true;
+    if (s.thread) stop();
+    if (!window) return false;
+    initialize(window);
+    // Suspend TSF at its source. Gameplay has neither a message hook nor a subclass.
+    if (s.manager) {
+        if (FAILED(s.manager->QueryInterface(IID_PPV_ARGS(&s.suspendedKeys))) ||
+            s.suspendedKeys->SuspendKeystrokeHandling() != S_OK) {
+            release(s.suspendedKeys);
+            stop();
+            return false;
+        }
+    }
+    s.previousImm = ImmAssociateContext(window, nullptr);
+    s.gameplayActive = true;
+    return true;
+}
+
+int ImeStart(Refresh refresh, Commit commitCallback) {
+    s.pending = State::Transition::None;
+    if (s.busy) return 0;
+    const HWND window = gameWindow();
+    if (s.hook && s.window && (!window || window == s.window)) return 1;
+    Busy busy;
+    if (s.thread) stop();
+    if (!window || !refresh || !commitCallback) return 0;
+    initialize(window);
+    s.refresh = refresh;
+    s.commit = commitCallback;
     if (!SetWindowSubclass(window, wndProc, SubclassId, 0) ||
-        !(s.hook = SetWindowsHookExW(WH_GETMESSAGE, getMessage, nullptr, thread))) {
+        !(s.hook = SetWindowsHookExW(WH_GETMESSAGE, getMessage, nullptr, s.thread))) {
         stop();
         return 0;
     }
@@ -964,7 +949,11 @@ int ImeStart(Refresh refresh, Commit commitCallback) {
 }
 
 void WINAPI ImeStop() {
-    if (s.busy || !s.thread) return;
+    if (s.busy) {
+        s.pending = State::Transition::Stop;
+        return;
+    }
+    if (!s.thread) return;
     Busy busy;
     stop();
 }
@@ -980,8 +969,8 @@ void ImeTick() {
 }
 
 int WINAPI ImeStatus() {
+    if (s.gameplayActive) return 5;
     if (!s.hook || !s.window) return 0;
-    if (s.gameplayActive) return s.restoredGameplayKey ? 6 : 5;
     if (s.token) return s.imm ? 3 : 2;
     return s.attachFailed && s.sample.token ? 4 : 1;
 }
@@ -1098,9 +1087,7 @@ PyObject* candidatesPython(PyObject*, PyObject*) {
 PyObject* statusPython(PyObject*, PyObject*) { return PyInt_FromLong(ImeStatus()); }
 
 PyObject* gameplayPython(PyObject*, PyObject*) {
-    s.sample.token = 0;
-    s.sample.gameplay = true;
-    Py_RETURN_NONE;
+    return PyBool_FromLong(ImeGameplay());
 }
 
 PyObject* clearPython(PyObject*, PyObject*) {

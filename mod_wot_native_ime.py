@@ -24,13 +24,14 @@ BATTLE = 'WotNativeImeBattle'
 _lobby = _battle = _battle_owner = None
 _library = None
 _tick_id = None
+_route_epoch = 0
 _binding = None
 _token = 0
 _enabled = _listening = False
 _status = None
 _status_labels = {0: 'waiting for game window', 1: 'hook ready', 2: 'TSF attached',
                   3: 'IMM attached', 4: 'TSF association failed',
-                  5: 'battle gameplay active', 6: 'battle gameplay restored process key'}
+                  5: 'battle gameplay, keyboard hooks removed'}
 _errors = set()
 _candidate_display = None
 _EMPTY_CANDIDATES = (-1, [], u'')
@@ -62,7 +63,7 @@ def _refresh():
         obj = view.flashObject if _enabled and view is not None else None
         if obj and _battle_owner is not None and not _battle_owner.isFocused():
             _binding = None
-            _library.ImeGameplay()
+            _library.ImeClear()
             return
         snapshot = obj.as_snapshot() if obj else None
         if snapshot is not None:
@@ -122,9 +123,21 @@ def _update_candidates(view, page):
 
 
 def _tick():
-    global _tick_id, _status
+    global _tick_id, _status, _binding
     _tick_id = None
+    epoch = _route_epoch
     view = _active()
+    if _enabled and _battle_owner is not None and not _battle_owner.isFocused():
+        _binding = None
+        _update_candidates(None, _EMPTY_CANDIDATES)
+        if _library.ImeGameplay():
+            if _status != 5:
+                _status = 5
+                print('[WotNativeIme] ' + _status_labels[5])
+            return
+        if epoch == _route_epoch:
+            _tick_id = BigWorld.callback(0.05, _tick)
+        return
     if not _enabled or view is None:
         if _library is not None:
             _library.ImeStop()
@@ -143,13 +156,17 @@ def _tick():
     except Exception:
         _error('Native input host unavailable')
         attached = False
-    _tick_id = BigWorld.callback(0.016 if attached else 0.25, _tick)
+    if epoch == _route_epoch and _enabled:
+        _tick_id = BigWorld.callback(0.016 if attached else 0.25, _tick)
 
 
-def _queue_tick():
-    global _tick_id
-    if _enabled and _tick_id is None:
-        _tick_id = BigWorld.callback(0, _tick)
+def _switch_route():
+    global _route_epoch, _tick_id
+    _route_epoch += 1
+    if _tick_id is not None:
+        BigWorld.cancelCallback(_tick_id)
+        _tick_id = None
+    _tick()
 
 
 class NativeImeView(View):
@@ -166,7 +183,7 @@ class NativeImeView(View):
                 _battle = self
             else:
                 _lobby = self
-            _queue_tick()
+            _switch_route()
         except Exception:
             _error('Could not initialize Scaleform input bridge')
 
@@ -210,11 +227,27 @@ _populate = BattleMessengerView._populate
 _dispose = BattleMessengerView._dispose
 
 
+def _watch_focus(original):
+    def changed(view, *args, **kwargs):
+        epoch = _route_epoch
+        focused = view.isFocused()
+        result = original(view, *args, **kwargs)
+        if _enabled and view is _battle_owner and epoch == _route_epoch and focused != view.isFocused():
+            _switch_route()
+        return result
+    return changed
+
+
+_focus_hooks = [(name, getattr(BattleMessengerView, name), _watch_focus(getattr(BattleMessengerView, name)))
+                for name in ('setFocused', '_BattleMessengerView__setGuiMode')]
+
+
 def _on_populate(view):
     global _battle_owner, _battle, _binding
     result = _populate(view)
     if _enabled:
         _battle_owner, _battle, _binding = view, None, None
+        _switch_route()
         try:
             _load_view(view.app, BATTLE)
         except Exception:
@@ -226,7 +259,7 @@ def _on_dispose(view):
     global _battle_owner, _battle, _binding
     if _battle_owner is view:
         _battle_owner = _battle = _binding = None
-        _queue_tick()
+        _switch_route()
     return _dispose(view)
 
 
@@ -243,6 +276,8 @@ def init():
         _listening = True
         BattleMessengerView._populate = _on_populate
         BattleMessengerView._dispose = _on_dispose
+        for name, original, hook in _focus_hooks:
+            setattr(BattleMessengerView, name, hook)
         _enabled = True
         print('[WotNativeIme] V1.0.8-beta mod loaded')
     except Exception:
@@ -256,7 +291,7 @@ def fini():
     if _listening:
         g_eventBus.removeListener(events.GUICommonEvent.LOBBY_VIEW_LOADED, _on_lobby_loaded)
         _listening = False
-    for name, hook, original in (('_populate', _on_populate, _populate), ('_dispose', _on_dispose, _dispose)):
+    for name, original, hook in _focus_hooks + [('_populate', _populate, _on_populate), ('_dispose', _dispose, _on_dispose)]:
         current = getattr(BattleMessengerView, name)
         if getattr(current, 'im_func', current) is hook:
             setattr(BattleMessengerView, name, original)
