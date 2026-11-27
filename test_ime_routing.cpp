@@ -29,7 +29,7 @@ int main() {
     WNDCLASSW cls{};
     cls.lpszClassName = L"WotImeRouteTest";
     cls.lpfnWndProc = [](HWND window, UINT message, WPARAM w, LPARAM l) -> LRESULT {
-        if (message == WM_IME_CHAR || message == WM_KEYDOWN || message == WM_IME_COMPOSITION ||
+        if (message == WM_IME_CHAR || message == WM_KEYDOWN || message == WM_KEYUP || message == WM_IME_COMPOSITION ||
             message == WM_IME_NOTIFY || message == WM_IME_SETCONTEXT) return stock;
         return DefWindowProcW(window, message, w, l);
     };
@@ -41,6 +41,49 @@ int main() {
     assert(ImeStart([] {}, [](unsigned, const wchar_t*, int, int, int, const wchar_t*, int, int, int) { return 0; }));
     ImeTick();
     assert(ImeStatus() == 1);
+    // A game window can have an IME association while keyboard focus is on
+    // a different TSF document for gameplay. Restore both independently.
+    ITfDocumentMgr *windowDoc = nullptr, *gameplay = nullptr, *prior = nullptr;
+    ITfDocumentMgr *initial = nullptr, *afterClose = nullptr;
+    assert(s.manager && SUCCEEDED(s.manager->GetFocus(&initial)));
+    s.token = 1;
+    assert(attachTsf());
+    detach();
+    assert(SUCCEEDED(s.manager->GetFocus(&afterClose)) && afterClose == initial);
+    release(afterClose);
+    release(initial);
+    assert(s.manager && SUCCEEDED(s.manager->CreateDocumentMgr(&windowDoc)));
+    assert(SUCCEEDED(s.manager->CreateDocumentMgr(&gameplay)));
+    assert(SUCCEEDED(s.manager->AssociateFocus(window, windowDoc, &prior)));
+    assert(SUCCEEDED(s.manager->SetFocus(gameplay)));
+    s.token = 1;
+    assert(attachTsf());
+    // First W after chat closes runs through the production refresh/detach path.
+    MSG move{window, WM_KEYDOWN, 'W', 1, 0, {0, 0}};
+    handleKey(move);
+    ITfDocumentMgr* restored = nullptr;
+    assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == gameplay);
+    release(restored);
+    assert(move.message == WM_KEYDOWN && move.wParam == 'W' && !s.token);
+    for (const auto key : std::wstring(L"WASD")) {
+        for (const UINT message : {WM_KEYDOWN, WM_KEYUP}) {
+            MSG event{window, message, static_cast<WPARAM>(key), 1, 0, {0, 0}};
+            getMessage(HC_ACTION, PM_REMOVE, reinterpret_cast<LPARAM>(&event));
+            assert(event.message == message && event.wParam == static_cast<WPARAM>(key));
+            assert(DispatchMessageW(&event) == stock);
+        }
+    }
+    assert(SUCCEEDED(s.manager->AssociateFocus(window, prior, &restored)) && restored == windowDoc);
+    release(restored);
+    // A host can change focus itself while closing the chat.
+    s.token = 1;
+    assert(attachTsf() && SUCCEEDED(s.manager->SetFocus(windowDoc)));
+    handleKey(move);
+    assert(SUCCEEDED(s.manager->GetFocus(&restored)) && restored == windowDoc);
+    release(restored);
+    release(prior);
+    release(gameplay);
+    release(windowDoc);
     ImeStop();
     assert(ImeStatus() == 0);
 

@@ -56,7 +56,7 @@ struct State {
     bool readingImm = false;
     TextStore* store = nullptr;
     TfClientId client = 0;
-    bool coInitialized = false, activated = false, associated = false;
+    bool coInitialized = false, activated = false;
     bool busy = false, imm = false, immComposing = false;
     unsigned immLifecycle = 0;
     bool attachFailed = false;
@@ -429,15 +429,11 @@ void detach() {
             }
         }
     }
-    if (s.associated) {
-        ITfDocumentMgr* displaced = nullptr;
-        s.manager->AssociateFocus(s.window, s.previous, &displaced);
-        release(displaced);
+    if (s.document && s.manager) {
         ITfDocumentMgr* current = nullptr;
         if (SUCCEEDED(s.manager->GetFocus(&current)) && current == s.document)
             s.manager->SetFocus(s.previous);
         release(current);
-        s.associated = false;
     }
     release(s.previous);
     if (s.document) s.document->Pop(TF_POPF_ALL);
@@ -457,8 +453,9 @@ bool attachTsf() {
     if (FAILED(s.manager->CreateDocumentMgr(&s.document)) ||
         FAILED(s.document->CreateContext(s.client, 0, static_cast<ITextStoreACP*>(s.store), &s.context, &cookie)) ||
         FAILED(s.document->Push(s.context))) return false;
-    s.associated = SUCCEEDED(s.manager->AssociateFocus(s.window, s.document, &s.previous));
-    return s.associated && SUCCEEDED(s.manager->SetFocus(s.document));
+    // Window focus is already managed by the game. Borrow only TSF keyboard
+    // focus while this field is active; the HWND association can be different.
+    return SUCCEEDED(s.manager->GetFocus(&s.previous)) && SUCCEEDED(s.manager->SetFocus(s.document));
 }
 
 enum class InputRoute { Stock, Tsf, Imm };
