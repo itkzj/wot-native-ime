@@ -14,6 +14,18 @@ package {
         private var reportedCorrection:Boolean;
         private const rowFormat:TextFormat = CandidateSkin.format();
 
+        override public function CreateList(count:Number, first:Number):* {
+            super.CreateList(count, first);
+            // CreateList reloads the client's defaults. SetList then applies these colors and size to every row.
+            SetCandidateListProps(-1, -1, -1, -1, -1, -1, -1);
+        }
+
+        override public function SetCandidateListProps(color:Number, selectedColor:Number, background:Number,
+                selectedBackground:Number, size:Number, indexBackground:Number, selectedIndexBackground:Number):* {
+            return super.SetCandidateListProps(Number(rowFormat.color), Number(rowFormat.color), background,
+                selectedBackground, Number(rowFormat.size), indexBackground, selectedIndexBackground);
+        }
+
         override public function DisplayCallback(selected:Number):* {
             // SetList has already filled the rows and applied the selection. This callback owns layout.
             if (!list_mc) return;
@@ -23,6 +35,7 @@ package {
             var selectedY:Number = 0;
             var selectedHeight:Number = 0;
             var rows:Array = list_mc.skinRows || (list_mc.skinRows = []);
+            var wrapped:Array = list_mc.wrappedLabels || (list_mc.wrappedLabels = []);
             for (var i:int = 0; i < list_mc.numChildren; ++i) {
                 var row:MovieClip = list_mc.getChildByName("Character" + i) as MovieClip;
                 if (!row || !row.visible) continue;
@@ -33,19 +46,21 @@ package {
                     value.embedFonts = number.embedFonts = false;
                     value.autoSize = number.autoSize = TextFieldAutoSize.LEFT;
                     value.defaultTextFormat = number.defaultTextFormat = rowFormat;
+                    number.setTextFormat(rowFormat);
+                    value.setTextFormat(rowFormat);
+                    wrapped[i] = null;
                     number.x = 8;
                 }
-                // The stock selection handler reapplies its own text format before SetList calls us.
-                number.setTextFormat(rowFormat);
-                value.setTextFormat(rowFormat);
-                number.alpha = value.text.length ? 1 : 0.25;
-                if (value.wordWrap) value.wordWrap = false;
+                var caption:String = value.text;
+                number.alpha = caption.length ? 1 : 0.25;
                 value.x = number.x + number.width + 2;
                 var available:Number = Math.max(24, limit - value.x - 8);
-                if (value.width > available) {
+                if (value.wordWrap && (wrapped[i] !== caption || value.width != available)) value.wordWrap = false;
+                if (!value.wordWrap && value.width > available) {
                     value.multiline = true;
                     value.wordWrap = true;
                     value.width = available;
+                    wrapped[i] = caption;
                 }
                 width = Math.max(width, Math.ceil(value.x + value.width + 8));
                 var h:Number = CandidateSkin.rowHeight(Math.max(value.height, number.height));
