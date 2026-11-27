@@ -99,6 +99,24 @@ for i in range(3):
     clock.run()
     assert native.focus == 'vehicle' and not game_input._BattleGameInputMgr__consumers
     assert clock.pending is None
+# Model the case where the document read back after clearing is the same chat.
+# Focus identity is checked in the native test. Here we exercise the stock close
+# path and the frame callbacks that must finish this handoff before polling stops.
+results = iter(('retry-chat', 'restored-chat'))
+def reselected_chat():
+    result = next(results)
+    if result == 'restored-chat':
+        assert handoff() == result
+    return result
+
+native.ImeBattleHandoff = reselected_chat
+assert chat.setFocused(True) and chat.setFocused(False)
+clock.run()
+assert native.focus == 'stock-chat' and clock.pending is not None, 'chat focus left without a scheduled handoff'
+clock.run()
+assert native.focus == 'vehicle' and clock.pending is None
+native.ImeBattleHandoff = handoff
+
 # A second GUI consumer may claim input between the stock close and our callback.
 assert chat.setFocused(True) and chat.setFocused(False)
 game_input._BattleGameInputMgr__consumers.add('map')
@@ -106,4 +124,4 @@ chat.isForcedGuiControlMode = lambda: False
 assert chat.hasGuiControlModeConsumers('map') and not chat.hasGuiControlModeConsumers()
 clock.run()
 assert native.focus == 'stock-chat' and clock.pending is None
-print('CN client focus bytecode passed three chat cycles and a late GUI owner with simulated Flash and native endpoints')
+print('CN client focus bytecode passed normal closes, reselected chat and late GUI ownership with simulated endpoints')

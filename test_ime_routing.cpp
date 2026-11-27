@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 
 // The installed keyboard need not supply a Chinese IMM result string.
@@ -20,6 +21,9 @@ static BOOL WINAPI testIsIme(HKL) { return TRUE; }
 #define GetKeyboardLayout testKeyboardLayout
 #define ImmIsIME testIsIme
 #define ImmGetCompositionStringW readTestComposition
+// Reassert focus after the real SetFocus(nullptr) and before the production GetFocus readback.
+static std::function<void()> afterClear;
+#define TEST_AFTER_CLEAR() do { if (afterClear) afterClear(); } while (false)
 #include "NativeIme.cpp"
 #undef ImmGetCompositionStringW
 
@@ -172,6 +176,55 @@ int main() {
         expectHandoff("restored-plugin");
         expectFocus(nullptr);
     }
+    ITfDocumentMgr* reclaimed = windowDoc;
+    const auto reclaim = [&] { assert(SUCCEEDED(host->SetFocus(reclaimed))); };
+    closeChat();
+    afterClear = reclaim;
+    const std::string firstClear = ImeBattleHandoff();
+    expectFocus(windowDoc);
+    afterClear = nullptr;
+    const std::string secondClear = ImeBattleHandoff();
+    if (firstClear != "retry-chat" || secondClear != "restored-chat")
+        std::fprintf(stderr, "Reclaimed chat: %s -> %s\n", firstClear.c_str(), secondClear.c_str());
+    assert(firstClear == "retry-chat" && secondClear == "restored-chat");
+    expectFocus(nullptr);
+    for (bool usePlugin : {false, true}) {
+        auto plugin = closeChat();
+        auto* target = usePlugin ? plugin.get() : windowDoc;
+        assert(SUCCEEDED(host->SetFocus(target)));
+        reclaimed = target;
+        afterClear = reclaim;
+        expectHandoff("retry-chat");
+        expectHandoff(usePlugin ? "plugin-reclaimed" : "chat-reclaimed");
+        expectHandoff("no-attachment");
+        expectFocus(target);
+        plugin = closeChat();
+        target = usePlugin ? plugin.get() : windowDoc;
+        auto* other = usePlugin ? windowDoc : plugin.get();
+        assert(SUCCEEDED(host->SetFocus(target)));
+        reclaimed = other;
+        expectHandoff("replaced-foreign"); // Even another recognised document is a change of ownership.
+        expectFocus(other);
+        expectHandoff("no-attachment");
+    }
+    auto pluginOnRetry = closeChat();
+    reclaimed = windowDoc;
+    expectHandoff("retry-chat");
+    assert(SUCCEEDED(host->SetFocus(pluginOnRetry.get())));
+    expectHandoff("foreign");
+    expectFocus(pluginOnRetry.get());
+    closeChat();
+    afterClear = [&] { closeChat(); };
+    expectHandoff("round-changed");
+    afterClear = nullptr;
+    expectHandoff("restored-chat"); // The new round retained its own identities.
+    closeChat();
+    afterClear = [&] { ImeBattleEnd(); reclaim(); };
+    expectHandoff("round-changed");
+    afterClear = nullptr;
+    expectHandoff("no-baseline");
+    expectFocus(windowDoc);
+    assert(SUCCEEDED(host->SetFocus(nullptr)) && ImeBattleBaseline());
     closeChat(true);
     expectFocus(gameplay);
     expectHandoff("foreign"); // The intermediate focus must not replace the original stock chat.
@@ -196,6 +249,16 @@ int main() {
     expectFocus(nullptr);
     closeChat();
     assert(SUCCEEDED(windowDoc->CreateContext(hostId, 0, nullptr, &newTop, &cookie)));
+    afterClear = [&] { reclaim(); assert(SUCCEEDED(windowDoc->Push(newTop))); };
+    expectHandoff("replaced-context");
+    expectHandoff("no-attachment");
+    expectFocus(windowDoc);
+    afterClear = nullptr;
+    assert(SUCCEEDED(windowDoc->Pop(0)));
+    closeChat();
+    afterClear = reclaim;
+    expectHandoff("retry-chat");
+    afterClear = nullptr;
     assert(SUCCEEDED(windowDoc->Push(newTop)));
     assert(std::string(ImeBattleHandoff()) == "foreign-context");
     expectFocus(windowDoc);

@@ -6,10 +6,20 @@
 // Each attachment keeps document and context identities alive across native stop().
 class BattleFocus {
     HWND baselineWindow = nullptr;
+    unsigned chatGeneration = 0;
+    enum class Retry { None, Chat, Plugin };
     struct Round {
         Com<ITfDocumentMgr> plugin, chat;
         Com<ITfContext> chatTop, pluginBase;
+        Retry retry = Retry::None;
     } round;
+
+    static bool sameTop(ITfDocumentMgr* document, ITfContext* expected) {
+        ITfContext* top = nullptr;
+        const HRESULT result = document->GetTop(&top);
+        const Com<ITfContext> context(top);
+        return SUCCEEDED(result) && sameCom(top, expected);
+    }
 
     static Com<ITfThreadMgr> existingManager() {
         const auto module = GetModuleHandleW(L"msctf.dll");
@@ -22,8 +32,8 @@ class BattleFocus {
     }
 
 public:
-    void beginChat() { round = {}; }
-    void endBattle() { baselineWindow = nullptr; round = {}; }
+    void beginChat() { ++chatGeneration; round = {}; }
+    void endBattle() { baselineWindow = nullptr; beginChat(); }
     void windowDestroyed(HWND window) { if (window == baselineWindow) endBattle(); }
 
     bool observeBaseline(bool (*inputActive)()) {
@@ -66,7 +76,8 @@ public:
     }
 
     const char* handoff(bool inputReleased) {
-        const auto closed = std::move(round);
+        auto closed = std::exchange(round, Round{});
+        const auto generation = chatGeneration;
         if (!baselineWindow) return "no-baseline";
         if (!closed.plugin) return "no-attachment";
         if (!inputReleased) return "not-released";
@@ -80,16 +91,27 @@ public:
         if (!current) return "already-clear";
         const bool ours = sameCom(current, closed.plugin.get());
         if (!ours && !sameCom(current, closed.chat.get())) return "foreign";
-        ITfContext* top = nullptr;
-        const HRESULT result = current->GetTop(&top);
-        const Com<ITfContext> context(top);
-        if (FAILED(result) || !sameCom(top, ours ? closed.pluginBase.get() : closed.chatTop.get())) return "foreign-context";
+        const Retry target = ours ? Retry::Plugin : Retry::Chat;
+        if (closed.retry != Retry::None && closed.retry != target) return "foreign";
+        auto* expectedTop = ours ? closed.pluginBase.get() : closed.chatTop.get();
+        if (!sameTop(current, expectedTop)) return "foreign-context";
+        if (generation != chatGeneration) return "round-changed";
         if (FAILED(manager->SetFocus(nullptr))) return "restore-failed";
+#ifdef TEST_AFTER_CLEAR
+        TEST_AFTER_CLEAR();
+#endif
         ITfDocumentMgr* after = nullptr;
         const HRESULT readBack = manager->GetFocus(&after);
         const Com<ITfDocumentMgr> observed(after);
         if (FAILED(readBack)) return "restore-unconfirmed";
-        if (after) return "focus-replaced";
-        return ours ? "restored-plugin" : "restored-chat";
+        if (generation != chatGeneration) return "round-changed";
+        if (!after) return ours ? "restored-plugin" : "restored-chat";
+        if (!sameCom(current, after)) return "replaced-foreign";
+        if (!sameTop(after, expectedTop)) return "replaced-context";
+        if (generation != chatGeneration) return "round-changed";
+        if (closed.retry != Retry::None) return ours ? "plugin-reclaimed" : "chat-reclaimed";
+        closed.retry = target;
+        round = std::move(closed);
+        return "retry-chat";
     }
 };

@@ -269,7 +269,7 @@ def _capture_baseline(view, allow_retry):
         _battle_baseline = ready or (None if allow_retry else False)
 
 
-def _queue_handoff(view, epoch):
+def _queue_handoff(view, epoch, attempt=1):
     global _tick_id
     def after_stock_close():
         global _tick_id
@@ -280,11 +280,14 @@ def _queue_handoff(view, epoch):
             if _gameplay_owner is not view or view.isFocused():
                 return
             result = _library.ImeBattleHandoff() if _gui_released(view) else 'gui-consumer'
-            print('[WotNativeIme] battle handoff baseline=%d result=%s' % (bool(_battle_baseline), result))
+            print('[WotNativeIme] battle handoff baseline=%d result=%s attempt=%d' %
+                  (bool(_battle_baseline), result, attempt))
+            if attempt == 1 and result == 'retry-chat' and epoch == _route_epoch:
+                _queue_handoff(view, epoch, 2)
         except Exception:
             _error('Could not hand battle input back to game')
-    # focusLostS can run inside a Scaleform event. Let the host finish that stack.
-    _tick_id = BigWorld.callback(0, after_stock_close)
+    # Unwind the stock focusLostS stack first. A confirmed same-chat rebound gets one recheck.
+    _tick_id = BigWorld.callback(0 if attempt == 1 else 0.05, after_stock_close)
 
 
 def _watch_focus(original, before_open=False):

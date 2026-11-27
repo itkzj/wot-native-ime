@@ -108,7 +108,7 @@ class Clock(object):
 
     def callback(self, delay, callback):
         assert self.pending is None
-        self.pending = callback
+        self.pending, self.delay = callback, delay
         return 1
 
     def run(self):
@@ -378,9 +378,58 @@ def test_routes():
     assert clock.pending is None and native.events == []
 
 
+def test_handoff_retry():
+    state, native, view, clock = new_fixture()
+    chat = BattleChat()
+    state['_on_populate'](chat)
+    state['_battle'] = view
+    focus = state['_watch_focus'](lambda owner, value: setattr(owner, 'opened', value), before_open=True)
+    def close_with(*outcomes):
+        results = list(outcomes)
+        native.ImeBattleHandoff = lambda: results.pop(0)
+        focus(chat, True)
+        focus(chat, False)
+        assert clock.pending and clock.delay == 0
+        clock.run()
+        return results
+
+    for last in ('restored-chat', 'chat-reclaimed', 'retry-chat'):
+        results = close_with('retry-chat', last)
+        assert clock.pending and clock.delay == 0.05 and results == [last]
+        clock.run()
+        assert not results and clock.pending is None
+    for terminal in ('already-clear', 'replaced-foreign', 'replaced-context'):
+        assert not close_with(terminal) and clock.pending is None
+
+    for interrupt in ('map', 'forced', 'reopen', 'dispose'):
+        results = close_with('retry-chat', 'restored-chat')
+        stale = clock.pending
+        if interrupt == 'map':
+            chat.consumers.add('map')
+            clock.run()
+            chat.consumers.clear()
+        elif interrupt == 'forced':
+            clock.forced_gui = True
+            clock.run()
+            clock.forced_gui = False
+        else:
+            if interrupt == 'reopen':
+                focus(chat, True)
+            else:
+                state['_on_dispose'](chat)
+            active_tick = clock.pending
+            assert active_tick and active_tick is not stale
+            stale()
+            assert clock.pending is active_tick
+        assert results == ['restored-chat']
+        if interrupt in ('map', 'forced'):
+            assert clock.pending is None
+
+
 if __name__ == '__main__':
     test_snapshots()
     test_routes()
+    test_handoff_retry()
     print('Battle baseline, deferred handoff, stale events and candidate generations passed')
 elif '__name__' not in globals():
     # The original local client-bytecode smoke loads this script with execfile(path, {}).
